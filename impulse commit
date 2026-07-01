@@ -1,0 +1,158 @@
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.api import VAR
+
+
+#Cholesky order (first = most exogenous).
+
+SERIES = [
+    {"name": "WTI",      "file": r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\Impulse Response Testing - Copy.xlsx",   "date_col": "WTI Date", "value_col": "WTI Log Diff",    "resample": "MS"},
+    {"name": "PCE", "file": r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\Impulse Response Testing - Copy.xlsx", "date_col": "PCE Date", "value_col": "PCE Scale Convert", "resample": "MS"},
+    # add more variables here, e.g.:
+    # {"name": "GDP", "file": "gdp.xlsx", "date_col": "Date", "value_col": "GDP", "resample": None},
+]
+
+APPLY_LOG_DIFF = False   # log-difference each series (approx. % change). Set False if
+                        # your data is already stationary / already transformed.
+
+IRF_PERIODS = 18        # horizon to plot
+SIGNIF = 0.05           # 95% CI
+MAX_LAGS = 12           # max lags to test when selecting VAR order
+
+
+
+def load_series(cfg):
+    """Load a single configured series into a datetime-indexed, named pd.Series."""
+    path = cfg["file"]
+    if str(path).lower().endswith(".csv"):
+        df = pd.read_csv(path)
+    else:
+        df = pd.read_excel(path)
+    
+    df.columns = df.columns.str.strip()
+
+    for col in (cfg["date_col"], cfg['value_col']):
+        if col not in df.columns:
+            raise  KeyError(
+                f"Column '{col}' not found in {path}."
+                f"Actual columns are: {list(df.columns)}"
+            )
+
+    df[cfg["date_col"]] = pd.to_datetime(df[cfg["date_col"]])
+    df = df.set_index(cfg["date_col"]).sort_index()
+    s = df[cfg["value_col"]].rename(cfg["name"])
+
+    if cfg.get("resample"):
+        s = s.resample(cfg["resample"]).mean()
+
+    return s
+
+
+def build_dataset(series_cfg):
+    series_list = [load_series(cfg) for cfg in series_cfg]
+    df = pd.concat(series_list, axis=1).dropna()
+    return df
+
+
+
+#log diff
+def transform(df, apply_log_diff=APPLY_LOG_DIFF):
+    if not apply_log_diff:
+        return df.dropna()
+    log_df = np.log(df)
+    log_df = log_df.replace([np.inf, -np.inf], np.nan)
+    diff_df = log_df.diff().dropna()
+    diff_df.columns = [f"d_log_{c}" for c in diff_df.columns]
+    return diff_df
+
+
+
+
+def fit_var(df, max_lags=MAX_LAGS):
+    model = VAR(df)
+    lag_selection = model.select_order(maxlags=max_lags)
+    chosen_lag = lag_selection.aic
+    print("\nLag order selection (AIC):")
+    print(lag_selection.summary())
+    print(f"\nSelected lag order (AIC): {chosen_lag}")
+
+    results = model.fit(chosen_lag if chosen_lag > 0 else 1)
+    print(results.summary())
+    return results
+
+
+
+
+def plot_irf_grid(results, var_names, periods=IRF_PERIODS, signif=SIGNIF):
+    irf = results.irf(periods=periods)
+
+    orth_irfs = irf.orth_irfs           # shape (periods+1, k, k)
+    stderr = irf.stderr(orth=True)      # shape (periods+1, k, k)
+
+    z = 1.96 if signif == 0.05 else abs(np.round(1 - signif, 2))
+    horizons = np.arange(orth_irfs.shape[0])
+    k = len(var_names)
+
+    fig, axes = plt.subplots(k, k, figsize=(6 * k, 5 * k), squeeze=False)
+    fig.suptitle(
+        "Impulse Response\nResponse to Cholesky One S.D. (d.f. adjusted) "
+        f"Innovations\n{int((1-signif)*100)}% CI using analytic asymptotic S.E.s",
+        fontsize=13, y=1.02
+    )
+
+    for i, response_var in enumerate(var_names):        # rows = response
+        for j, impulse_var in enumerate(var_names):      # cols = impulse
+            ax = axes[i, j]
+            resp = orth_irfs[:, i, j]
+            se = stderr[:, i, j]
+            upper = resp + z * se
+            lower = resp - z * se
+
+            ax.plot(horizons, resp, color="black", linewidth=1.3)
+            ax.fill_between(horizons, lower, upper, color="gray", alpha=0.3)
+            ax.axhline(0, color="black", linewidth=0.6, linestyle="--")
+            ax.set_title(f"Response of {response_var} to {impulse_var} Innovation",
+                          fontsize=10, style="italic")
+            ax.set_xlim(0, periods)
+            ax.grid(alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+
+    return orth_irfs, stderr, horizons
+
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+    df = build_dataset(SERIES)
+    print(f"Loaded {len(df)} observations from "
+          f"{df.index.min().date()} to {df.index.max().date()}")
+    print(f"Variables (Cholesky order): {list(df.columns)}")
+
+    print("Raw Transformed Data")
+    print(df.head(10))
+
+    
+
+
+
+model_df = transform(df)
+
+print("Number of observations after transformation:",
+      len(model_df))
+
+results = fit_var(model_df)
+resid_std = results.resid['WTI'].std()
+print(f"1 S.D. shock to WTI = {resid_std*100:.2f}% month over month move")
+
+var_names = list(model_df.columns)
+orth_irfs, stderr, horizons = plot_irf_grid(results, var_names)
+
