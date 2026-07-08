@@ -1,0 +1,184 @@
+PS C:\Users\oaksla\AppData\Local\Programs\Microsoft VS Code> & "C:\Program Files\Python314\python.exe" "c:/Users/oaksla/OneDrive - Federated Hermes, Inc/Desktop/BVAR/Tier Two GDP IMPULSE.py"
+Loaded Tier 1 shocks from C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\New folder\tier1_shocks.csv
+  311 months, 2000-07-31 to 2026-05-31
+  Shock variables: ['WTI_shock', 'FED Funds_shock', 'Corporate Credit Spreads_shock', 'Unemployment_shock', 'INDPROD_shock']
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\pandas\core\arraylike.py:402: RuntimeWarning: divide by zero encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\pandas\core\arraylike.py:402: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+
+----------------------------------------------------------------------------------------------------
+TIER 2 -- Fitting each Tier 1 shock against each GDP-component proxy
+----------------------------------------------------------------------------------------------------
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: A date index has been provided, but it has no associated frequency information and so will be ignored when e.g. forecasting.
+  self._init_dates(dates, freq)
+  [WTI_shock -> PCE] stability=True, whiteness_p=0.5553781522371171 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: A date index has been provided, but it has no associated frequency information and so will be ignored when e.g. forecasting.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> PCE] stability=True, whiteness_p=0.665942838308031 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: A date index has been provided, but it has no associated frequency information and so will be ignored when e.g. forecasting.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> PCE] stability=True, whiteness_p=0.18238493256694374 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: A date index has been provided, but it has no associated frequency information and so will be ignored when e.g. forecasting.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> PCE] stability=True, whiteness_p=0.07335577305171996 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: A date index has been provided, but it has no associated frequency information and so will be ignored when e.g. forecasting.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> PCE] stability=True, whiteness_p=0.3495693325802157 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [WTI_shock -> CapitalGoodsOrders] stability=True, whiteness_p=0.424912490519065 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> CapitalGoodsOrders] stability=True, whiteness_p=0.5142554246808153 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> CapitalGoodsOrders] stability=True, whiteness_p=0.22288906703465694 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> CapitalGoodsOrders] stability=True, whiteness_p=0.6711244743148861 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> CapitalGoodsOrders] stability=True, whiteness_p=0.36509172489238245 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [WTI_shock -> HousingStarts] stability=True, whiteness_p=0.5872518283574781 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> HousingStarts] stability=True, whiteness_p=0.24983615982101423 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> HousingStarts] stability=True, whiteness_p=0.9492472732198083 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> HousingStarts] stability=True, whiteness_p=0.7972843404136721 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> HousingStarts] stability=True, whiteness_p=0.7145611098658456 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [WTI_shock -> PublicConstruction] stability=True, whiteness_p=0.14413168960275702 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> PublicConstruction] stability=True, whiteness_p=0.041500107763873556 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> PublicConstruction] stability=True, whiteness_p=0.05279853860025187 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> PublicConstruction] stability=True, whiteness_p=0.03788702288331847 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> PublicConstruction] stability=True, whiteness_p=0.006463840475499339 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [WTI_shock -> Exports] stability=True, whiteness_p=7.977595765279692e-16 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> Exports] stability=True, whiteness_p=5.632379599260956e-16 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> Exports] stability=True, whiteness_p=5.102822585125968e-15 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> Exports] stability=True, whiteness_p=9.25058645736556e-16 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> Exports] stability=True, whiteness_p=3.43506270054714e-17 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [WTI_shock -> Imports] stability=True, whiteness_p=1.3463785013233636e-08 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> Imports] stability=True, whiteness_p=8.17598294106681e-09 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> Imports] stability=True, whiteness_p=2.2547350771482114e-08 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> Imports] stability=True, whiteness_p=7.746838373806286e-08 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> Imports] stability=True, whiteness_p=5.298601456679454e-09 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [WTI_shock -> WholesaleInventories] stability=True, whiteness_p=0.32479074249542167 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [FED Funds_shock -> WholesaleInventories] stability=True, whiteness_p=0.06593316958459643 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Corporate Credit Spreads_shock -> WholesaleInventories] stability=True, whiteness_p=0.21419259200934904 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [Unemployment_shock -> WholesaleInventories] stability=True, whiteness_p=0.43645486148477103 -> OK
+C:\Users\oaksla\AppData\Roaming\Python\Python314\site-packages\statsmodels\tsa\base\tsa_model.py:473: ValueWarning: No frequency information was provided, so inferred frequency ME will be used.
+  self._init_dates(dates, freq)
+  [INDPROD_shock -> WholesaleInventories] stability=True, whiteness_p=0.3933274813865723 -> OK
+Tier 2 Summary: Peak Response of Each Proxy to Each Tier 1 Shock:
+gdp_category            component  sign                          shock  n_obs  lag  resid_std_shock  peak_response  peak_response_signed  peak_period  significant  stable  whiteness_p note
+         PCE                  PCE     1                      WTI_shock    212    4          0.10186        0.08288               0.08288            1        False    True       0.5554     
+         PCE                  PCE     1                FED Funds_shock    212    4          0.18393        0.06329               0.06329            3        False    True       0.6659     
+         PCE                  PCE     1 Corporate Credit Spreads_shock    212    4         18.67399        0.07107               0.07107            4        False    True       0.1824     
+         PCE                  PCE     1             Unemployment_shock    212    3          0.32393       -0.03647              -0.03647            0        False    True       0.0734     
+         PCE                  PCE     1                  INDPROD_shock    212    3          0.59801       -0.02632              -0.02632            1        False    True       0.3496     
+  Investment   CapitalGoodsOrders     1                      WTI_shock    311    4          0.09920        0.00449               0.00449            0         True    True       0.4249     
+  Investment   CapitalGoodsOrders     1                FED Funds_shock    311    4          0.17908        0.00305               0.00305            1         True    True       0.5143     
+  Investment   CapitalGoodsOrders     1 Corporate Credit Spreads_shock    311    4         20.54769       -0.00430              -0.00430            1         True    True       0.2229     
+  Investment   CapitalGoodsOrders     1             Unemployment_shock    311    4          0.45231        0.00302               0.00302            2        False    True       0.6711     
+  Investment   CapitalGoodsOrders     1                  INDPROD_shock    311    4          0.74359       -0.00408              -0.00408            1         True    True       0.3651     
+  Investment        HousingStarts     1                      WTI_shock    311    3          0.10046        0.01741               0.01741            2         True    True       0.5873     
+  Investment        HousingStarts     1                FED Funds_shock    311    2          0.17884        0.00910               0.00910            2        False    True       0.2498     
+  Investment        HousingStarts     1 Corporate Credit Spreads_shock    311    3         20.74167       -0.01757              -0.01757            2         True    True       0.9492     
+  Investment        HousingStarts     1             Unemployment_shock    311    1          0.45291       -0.01973              -0.01973            0         True    True       0.7973     
+  Investment        HousingStarts     1                  INDPROD_shock    311    1          0.74569        0.02141               0.02141            0         True    True       0.7146     
+  Government   PublicConstruction     1                      WTI_shock    311    1          0.10083       -0.00121              -0.00121            0        False    True       0.1441     
+  Government   PublicConstruction     1                FED Funds_shock    311    1          0.17945       -0.00048              -0.00048            0        False    True       0.0415     
+  Government   PublicConstruction     1 Corporate Credit Spreads_shock    311    1         20.78188        0.00180               0.00180            0        False    True       0.0528     
+  Government   PublicConstruction     1             Unemployment_shock    311    1          0.45514        0.00121               0.00121            0        False    True       0.0379     
+  Government   PublicConstruction     1                  INDPROD_shock    311    1          0.74612       -0.00067              -0.00067            0        False    True       0.0065     
+  NetExports              Exports     1                      WTI_shock    311    4          0.10076        0.01790               0.01790            1         True    True       0.0000     
+  NetExports              Exports     1                FED Funds_shock    311    5          0.17727        0.00922               0.00922            1         True    True       0.0000     
+  NetExports              Exports     1 Corporate Credit Spreads_shock    311    4         20.71135       -0.01059              -0.01059            2         True    True       0.0000     
+  NetExports              Exports     1             Unemployment_shock    311    5          0.44757        0.01324               0.01324            1         True    True       0.0000     
+  NetExports              Exports     1                  INDPROD_shock    311    5          0.73276        0.00744               0.00744            3         True    True       0.0000     
+  NetExports              Imports    -1                      WTI_shock    311    4          0.10069        0.01538              -0.01538            1         True    True       0.0000     
+  NetExports              Imports    -1                FED Funds_shock    311    4          0.17760        0.00707              -0.00707            1         True    True       0.0000     
+  NetExports              Imports    -1 Corporate Credit Spreads_shock    311    4         20.77791       -0.01261               0.01261            3         True    True       0.0000     
+  NetExports              Imports    -1             Unemployment_shock    311    5          0.44996        0.00850              -0.00850            1         True    True       0.0000     
+  NetExports              Imports    -1                  INDPROD_shock    311    5          0.73565        0.00694              -0.00694            4        False    True       0.0000     
+ Inventories WholesaleInventories     1                      WTI_shock    311    5          0.10045        0.16745               0.16745            5         True    True       0.3248     
+ Inventories WholesaleInventories     1                FED Funds_shock    311    3          0.17862        0.06723               0.06723            2         True    True       0.0659     
+ Inventories WholesaleInventories     1 Corporate Credit Spreads_shock    311    3         20.77432       -0.05885              -0.05885            3        False    True       0.2142     
+ Inventories WholesaleInventories     1             Unemployment_shock    311    3          0.45432        0.06418               0.06418            1         True    True       0.4365     
+ Inventories WholesaleInventories     1                  INDPROD_shock    311    3          0.74355        0.12544               0.12544            3         True    True       0.3933     
+
+======================================================================
+Pooled-by-Category Preview (what Tier 3 will consume)
+======================================================================
+gdp_category                          shock  n_proxies                           proxies  pooled_response  any_significant
+  Government Corporate Credit Spreads_shock          1                PublicConstruction         0.001800            False
+  Government                FED Funds_shock          1                PublicConstruction        -0.000480            False
+  Government                  INDPROD_shock          1                PublicConstruction        -0.000670            False
+  Government             Unemployment_shock          1                PublicConstruction         0.001210            False
+  Government                      WTI_shock          1                PublicConstruction        -0.001210            False
+ Inventories Corporate Credit Spreads_shock          1              WholesaleInventories        -0.058850            False
+ Inventories                FED Funds_shock          1              WholesaleInventories         0.067230             True
+ Inventories                  INDPROD_shock          1              WholesaleInventories         0.125440             True
+ Inventories             Unemployment_shock          1              WholesaleInventories         0.064180             True
+ Inventories                      WTI_shock          1              WholesaleInventories         0.167450             True
+  Investment Corporate Credit Spreads_shock          2 CapitalGoodsOrders, HousingStarts        -0.010935             True
+  Investment                FED Funds_shock          2 CapitalGoodsOrders, HousingStarts         0.006075             True
+  Investment                  INDPROD_shock          2 CapitalGoodsOrders, HousingStarts         0.008665             True
+  Investment             Unemployment_shock          2 CapitalGoodsOrders, HousingStarts        -0.008355             True
+  Investment                      WTI_shock          2 CapitalGoodsOrders, HousingStarts         0.010950             True
+  NetExports Corporate Credit Spreads_shock          2                  Exports, Imports         0.001010             True
+  NetExports                FED Funds_shock          2                  Exports, Imports         0.001075             True
+  NetExports                  INDPROD_shock          2                  Exports, Imports         0.000250             True
+  NetExports             Unemployment_shock          2                  Exports, Imports         0.002370             True
+  NetExports                      WTI_shock          2                  Exports, Imports         0.001260             True
+         PCE Corporate Credit Spreads_shock          1                               PCE         0.071070            False
+         PCE                FED Funds_shock          1                               PCE         0.063290            False
+         PCE                  INDPROD_shock          1                               PCE        -0.026320            False
+         PCE             Unemployment_shock          1                               PCE        -0.036470            False
+         PCE                      WTI_shock          1                               PCE         0.082880            False
