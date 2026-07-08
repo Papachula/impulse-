@@ -1,0 +1,79 @@
+Tier 2 Summary: Peak Response of Each Proxy to Each Tier 1 Shock:
+gdp_category            component  sign                          shock  n_obs  lag  resid_std_shock  peak_response  peak_response_signed  peak_period  significant  stable  whiteness_p note
+         PCE                  PCE     1                      WTI_shock    212    3          0.10349        0.09195               0.09195            1         True    True       0.3301     
+         PCE                  PCE     1                FED Funds_shock    212    4          0.20441       -0.09399              -0.09399            1         True    True       0.5202     
+         PCE                  PCE     1 Corporate Credit Spreads_shock    212    4         18.65584        0.04267               0.04267            2        False    True       0.3936     
+         PCE                  PCE     1                 ConsConf_shock    212    5          0.06536       -0.14517              -0.14517            0         True    True       0.2355     
+         PCE                  PCE     1             Unemployment_shock    212    3          0.32353        0.07226               0.07226            3        False    True       0.2832     
+         PCE                  PCE     1                  INDPROD_shock    212    3          0.59303       -0.03882              -0.03882            3        False    True       0.3402     
+  Investment   CapitalGoodsOrders     1                      WTI_shock    311    4          0.09894        0.00430               0.00430            0         True    True       0.6124     
+  Investment   CapitalGoodsOrders     1                FED Funds_shock    311    4          0.21438        0.00275               0.00275            3        False    True       0.1414     
+  Investment   CapitalGoodsOrders     1 Corporate Credit Spreads_shock    311    4         20.19493       -0.00463              -0.00463            3         True    True       0.3140     
+  Investment   CapitalGoodsOrders     1                 ConsConf_shock    311    4          0.07229        0.00148               0.00148            0        False    True       0.2273     
+  Investment   CapitalGoodsOrders     1             Unemployment_shock    311    4          0.44444        0.00347               0.00347            1         True    True       0.3242     
+  Investment   CapitalGoodsOrders     1                  INDPROD_shock    311    4          0.74303       -0.00482              -0.00482            1         True    True       0.3737     
+  Investment        HousingStarts     1                      WTI_shock    311    3          0.10004        0.01793               0.01793            2         True    True       0.5962     
+  Investment        HousingStarts     1                FED Funds_shock    311    1          0.21683        0.00268               0.00268            0        False    True       0.5297     
+  Investment        HousingStarts     1 Corporate Credit Spreads_shock    311    3         20.41223       -0.01916              -0.01916            2         True    True       0.9676     
+  Investment        HousingStarts     1                 ConsConf_shock    311    1          0.07248        0.00728               0.00728            0        False    True       0.7036     
+  Investment        HousingStarts     1             Unemployment_shock    311    1          0.44628       -0.01989              -0.01989            0         True    True       0.7378     
+  Investment        HousingStarts     1                  INDPROD_shock    311    1          0.74603        0.02214               0.02214            0         True    True       0.8006     
+  Government   PublicConstruction     1                      WTI_shock    311    1          0.10025       -0.00120              -0.00120            0        False    True       0.1922     
+  Government   PublicConstruction     1                FED Funds_shock    311    1          0.21682       -0.00067              -0.00067            1        False    True       0.0048     
+  Government   PublicConstruction     1 Corporate Credit Spreads_shock    311    1         20.44772        0.00191               0.00191            0        False    True       0.0380     
+  Government   PublicConstruction     1                 ConsConf_shock    311    1          0.07248       -0.00273              -0.00273            1         True    True       0.0452     
+  Government   PublicConstruction     1             Unemployment_shock    311    1          0.44703        0.00097               0.00097            0        False    True       0.0436     
+  Government   PublicConstruction     1                  INDPROD_shock    311    1          0.74585       -0.00074              -0.00074            0        False    True       0.0100     
+  NetExports              Exports     1                      WTI_shock    311    4          0.10036        0.01671               0.01671            1         True    True       0.0000     
+  NetExports              Exports     1                FED Funds_shock    311    4          0.21496        0.01198               0.01198            1         True    True       0.0000     
+  NetExports              Exports     1 Corporate Credit Spreads_shock    311    5         20.24375       -0.00994              -0.00994            2         True    True       0.0000     
+  NetExports              Exports     1                 ConsConf_shock    311    4          0.07227        0.00495               0.00495            3        False    True       0.0000     
+  NetExports              Exports     1             Unemployment_shock    311    5          0.43993        0.00966               0.00966            1         True    True       0.0000     
+  NetExports              Exports     1                  INDPROD_shock    311    5          0.73099        0.00693               0.00693            3        False    True       0.0000     
+  NetExports              Imports    -1                      WTI_shock    311    4          0.10022        0.01547              -0.01547            1         True    True       0.0000     
+  NetExports              Imports    -1                FED Funds_shock    311    4          0.21563        0.00600              -0.00600            1        False    True       0.0000     
+  NetExports              Imports    -1 Corporate Credit Spreads_shock    311    4         20.35648       -0.01335               0.01335            3         True    True       0.0000     
+  NetExports              Imports    -1                 ConsConf_shock    311    4          0.07246       -0.00355               0.00355            0        False    True       0.0000     
+  NetExports              Imports    -1             Unemployment_shock    311    4          0.44528        0.00914              -0.00914            1         True    True       0.0000     
+  NetExports              Imports    -1                  INDPROD_shock    311    5          0.73619        0.00717              -0.00717            4         True    True       0.0000     
+ Inventories WholesaleInventories     1                      WTI_shock    311    5          0.09975        0.17750               0.17750            5         True    True       0.3191     
+ Inventories WholesaleInventories     1                FED Funds_shock    311    3          0.21513        0.06471               0.06471            1         True    True       0.0276     
+ Inventories WholesaleInventories     1 Corporate Credit Spreads_shock    311    5         20.27523       -0.14051              -0.14051            5         True    True       0.3410     
+ Inventories WholesaleInventories     1                 ConsConf_shock    311    3          0.07174        0.02113               0.02113            2        False    True       0.1921     
+ Inventories WholesaleInventories     1             Unemployment_shock    311    3          0.44586        0.07561               0.07561            1         True    True       0.1040     
+ Inventories WholesaleInventories     1                  INDPROD_shock    311    3          0.74197        0.11451               0.11451            3         True    True       0.3174     
+
+======================================================================
+Pooled-by-Category Preview (what Tier 3 will consume)
+======================================================================
+gdp_category                          shock  n_proxies                           proxies  pooled_response  any_significant
+  Government                 ConsConf_shock          1                PublicConstruction        -0.002730             True
+  Government Corporate Credit Spreads_shock          1                PublicConstruction         0.001910            False
+  Government                FED Funds_shock          1                PublicConstruction        -0.000670            False
+  Government                  INDPROD_shock          1                PublicConstruction        -0.000740            False
+  Government             Unemployment_shock          1                PublicConstruction         0.000970            False
+  Government                      WTI_shock          1                PublicConstruction        -0.001200            False
+ Inventories                 ConsConf_shock          1              WholesaleInventories         0.021130            False
+ Inventories Corporate Credit Spreads_shock          1              WholesaleInventories        -0.140510             True
+ Inventories                FED Funds_shock          1              WholesaleInventories         0.064710             True
+ Inventories                  INDPROD_shock          1              WholesaleInventories         0.114510             True
+ Inventories             Unemployment_shock          1              WholesaleInventories         0.075610             True
+ Inventories                      WTI_shock          1              WholesaleInventories         0.177500             True
+  Investment                 ConsConf_shock          2 CapitalGoodsOrders, HousingStarts         0.004380            False
+  Investment Corporate Credit Spreads_shock          2 CapitalGoodsOrders, HousingStarts        -0.011895             True
+  Investment                FED Funds_shock          2 CapitalGoodsOrders, HousingStarts         0.002715            False
+  Investment                  INDPROD_shock          2 CapitalGoodsOrders, HousingStarts         0.008660             True
+  Investment             Unemployment_shock          2 CapitalGoodsOrders, HousingStarts        -0.008210             True
+  Investment                      WTI_shock          2 CapitalGoodsOrders, HousingStarts         0.011115             True
+  NetExports                 ConsConf_shock          2                  Exports, Imports         0.004250            False
+  NetExports Corporate Credit Spreads_shock          2                  Exports, Imports         0.001705             True
+  NetExports                FED Funds_shock          2                  Exports, Imports         0.002990             True
+  NetExports                  INDPROD_shock          2                  Exports, Imports        -0.000120             True
+  NetExports             Unemployment_shock          2                  Exports, Imports         0.000260             True
+  NetExports                      WTI_shock          2                  Exports, Imports         0.000620             True
+         PCE                 ConsConf_shock          1                               PCE        -0.145170             True
+         PCE Corporate Credit Spreads_shock          1                               PCE         0.042670            False
+         PCE                FED Funds_shock          1                               PCE        -0.093990             True
+         PCE                  INDPROD_shock          1                               PCE        -0.038820            False
+         PCE             Unemployment_shock          1                               PCE         0.072260            False
+         PCE                      WTI_shock          1                               PCE         0.091950             True
