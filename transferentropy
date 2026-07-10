@@ -1,0 +1,357 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from itertools import product
+
+
+
+
+FILE = r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\Dataframe.xlsx"
+
+SOURCE_COL = "CL1COMB"
+TARGET_COL = "PCE"
+
+#   "none"       raw level
+#   "diff"      = simple difference
+#   "mom"       = percent monthly change
+#   "yoy"       = percent year-over-year change
+#   "log"       = log level
+#   "log_diff"  = log difference
+#   "log_mom"   = log monthly change, same as log_diff
+#   "log_yoy"   = log year-over-year change
+
+SOURCE_TRANSFORM = "log_diff"
+TARGET_TRANSFORM = "none"
+
+MAX_LAG = 12
+BINS = 4
+PERM = 500
+ROLLING_WINDOW = 120   # 10 years
+
+df = pd.read_excel(FILE)
+
+df["Date"] = pd.to_datetime(df["Date"])
+df = df.set_index("Date")
+
+df = df.replace(["n/a", "NA", "N/A", ""], np.nan)
+
+for c in df.columns:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+monthly = df.resample("ME").last()
+
+
+
+def transform_series(s, method):
+    """
+    Applies selected transformation to a series.
+    """
+
+    s = s.replace([np.inf, -np.inf], np.nan)
+
+    if method == "none":
+        return s
+
+    if method == "diff":
+        return s.diff()
+
+    if method == "mom":
+        return s.pct_change()
+
+    if method == "yoy":
+        return s.pct_change(12)
+
+    if method == "log":
+        return np.log(s.replace(0, np.nan))
+
+    if method == "log_diff":
+        log_s = np.log(s.replace(0, np.nan))
+        return log_s.diff()
+
+    if method == "log_mom":
+        log_s = np.log(s.replace(0, np.nan))
+        return log_s.diff()
+
+    if method == "log_yoy":
+        log_s = np.log(s.replace(0, np.nan))
+        return log_s.diff(12)
+
+    raise ValueError(
+        "method must be one of: none, diff, mom, yoy, log, log_diff, log_mom, log_yoy"
+    )
+
+
+
+def discretize(s, bins=BINS):
+
+
+    v = s.dropna()
+
+    if len(v) < 50:
+        return pd.Series(index=s.index, dtype=float)
+
+    q = pd.qcut(
+        v,
+        q=bins,
+        labels=False,
+        duplicates="drop"
+    )
+
+    out = pd.Series(index=s.index, dtype=float)
+    out.loc[v.index] = q
+
+    return out
+
+
+
+source_raw = monthly[SOURCE_COL]
+target_raw = monthly[TARGET_COL]
+
+source_transformed = transform_series(source_raw, SOURCE_TRANSFORM)
+target_transformed = transform_series(target_raw, TARGET_TRANSFORM)
+
+source = discretize(source_transformed)
+target = discretize(target_transformed)
+
+
+
+def transfer_entropy(source, target, lag):
+
+    d = pd.DataFrame({
+        "yf": target.shift(-1),
+        "y": target,
+        "x": source.shift(lag)
+    }).dropna()
+
+    if len(d) < 50:
+        return np.nan
+
+    te = 0.0
+
+    for yf, y, x in product(
+        d["yf"].unique(),
+        d["y"].unique(),
+        d["x"].unique()
+    ):
+
+        xyz = ((d["yf"] == yf) & (d["y"] == y) & (d["x"] == x))
+        yx = ((d["y"] == y) & (d["x"] == x))
+        yz = (d["y"] == y)
+
+        p_xyz = xyz.mean()
+
+        if p_xyz == 0:
+            continue
+
+        p_yx = yx.mean()
+        p_yz = yz.mean()
+
+        if p_yx == 0 or p_yz == 0:
+            continue
+
+        p_yf_given_yx = p_xyz / p_yx
+
+        p_yf_y = ((d["yf"] == yf) & (d["y"] == y)).mean()
+        p_yf_given_y = p_yf_y / p_yz
+
+        if p_yf_given_y == 0:
+            continue
+
+        te += p_xyz * np.log2(p_yf_given_yx / p_yf_given_y)
+
+    return te
+
+
+
+
+lags = np.arange(1, MAX_LAG + 1)
+
+te_values = np.array([
+    transfer_entropy(source, target, lag)
+    for lag in lags
+])
+
+best_idx = np.nanargmax(te_values)
+
+BEST_LAG = int(lags[best_idx])
+BEST_TE = float(te_values[best_idx])
+
+
+
+
+null = []
+
+for _ in range(PERM):
+
+    shuffled_source = pd.Series(
+        np.random.permutation(source.values),
+        index=source.index
+    )
+
+    null_te = transfer_entropy(
+        shuffled_source,
+        target,
+        BEST_LAG
+    )
+
+    null.append(null_te)
+
+null = np.array(null)
+null = null[~np.isnan(null)]
+
+P_VALUE = (
+    np.sum(null >= BEST_TE) + 1
+) / (len(null) + 1)
+
+
+
+
+rolling_vals = []
+rolling_dates = []
+
+for i in range(ROLLING_WINDOW, len(source)):
+
+    s_window = source.iloc[i - ROLLING_WINDOW:i]
+    t_window = target.iloc[i - ROLLING_WINDOW:i]
+
+    rolling_vals.append(
+        transfer_entropy(
+            s_window,
+            t_window,
+            BEST_LAG
+        )
+    )
+
+    rolling_dates.append(
+        source.index[i]
+    )
+
+rolling_te = pd.Series(
+    rolling_vals,
+    index=rolling_dates
+)
+
+
+
+print("__" * 50)
+print("TRANSFER ENTROPY")
+print("__" * 50)
+
+print("Source Variable   :", SOURCE_COL)
+print("Target Variable   :", TARGET_COL)
+print("Source Transform  :", SOURCE_TRANSFORM)
+print("Target Transform  :", TARGET_TRANSFORM)
+print("Best Lag          :", BEST_LAG)
+print("Transfer Entropy  :", round(BEST_TE, 6))
+print("P-Value           :", round(P_VALUE, 6))
+
+print("__" * 50)
+
+
+
+plt.figure(figsize=(10, 5))
+
+plt.plot(
+    lags,
+    te_values,
+    marker="o"
+)
+
+plt.axvline(
+    BEST_LAG,
+    linestyle="--",
+    color="red"
+)
+
+plt.title(
+    f"Transfer Entropy Lag Profile\n"
+    f"{SOURCE_COL} ({SOURCE_TRANSFORM}) → {TARGET_COL} ({TARGET_TRANSFORM})"
+)
+
+plt.xlabel("Lag (Months)")
+plt.ylabel("Transfer Entropy")
+
+plt.grid(True)
+plt.tight_layout()
+
+
+
+
+plt.figure(figsize=(10, 5))
+
+plt.plot(
+    rolling_te.index,
+    rolling_te.values
+)
+
+plt.title(
+    f"Rolling 10Y Transfer Entropy\n"
+    f"{SOURCE_COL} → {TARGET_COL}, Lag={BEST_LAG}"
+)
+
+plt.xlabel("Date")
+plt.ylabel("Transfer Entropy")
+
+plt.grid(True)
+plt.tight_layout()
+
+
+plt.figure(figsize=(8, 5))
+
+plt.hist(
+    null,
+    bins=30,
+    alpha=0.75
+)
+
+plt.axvline(
+    BEST_TE,
+    color="red",
+    linewidth=2
+)
+
+plt.title(
+    f"Permutation Test\n"
+    f"Observed TE={BEST_TE:.4f}, p={P_VALUE:.4f}"
+)
+
+plt.xlabel("Transfer Entropy Under Null")
+plt.ylabel("Frequency")
+
+plt.tight_layout()
+
+
+
+
+heat = te_values.reshape(1, -1)
+
+plt.figure(figsize=(12, 2.5))
+
+im = plt.imshow(
+    heat,
+    aspect="auto",
+    cmap="viridis"
+)
+
+plt.yticks([0], [SOURCE_COL])
+
+plt.xticks(
+    np.arange(MAX_LAG),
+    np.arange(1, MAX_LAG + 1)
+)
+
+plt.xlabel("Lag (Months)")
+
+plt.title(
+    f"Transfer Entropy Heatmap\n"
+    f"{SOURCE_COL} ({SOURCE_TRANSFORM}) → {TARGET_COL} ({TARGET_TRANSFORM})"
+)
+
+plt.colorbar(
+    im,
+    label="TE"
+)
+
+plt.tight_layout()
+
+plt.show()
