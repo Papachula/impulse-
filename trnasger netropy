@@ -1,0 +1,539 @@
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import warnings
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+from scipy.spatial import cKDTree
+from scipy.special import digamma
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore")
+
+
+CONFIG = {
+    # ---- Data ----------------------------------------------------------------
+    "excel_path":r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\Dataframe.xlsx",
+    "sheet_name" : "Dateframe",                  # sheet index or name
+    "date_col": "Date",               # name of the date column
+    "source_col": "WTI Spot",              # candidate driver  (X in  X -> Y)
+    "target_col": "PCE",              # series being predicted (Y)
+    "resample": "ME",                 # e.g. "ME" to force month-end frequency, or None
+
+
+    "source_transform": "pct_change",
+    "target_transform": "level",
+    "standardize": True,              # z-score after transform (scale-free; recommended)
+
+    # ---- TE estimation --------------------------------------------------------
+    "estimator": "ksg",               # "ksg" (continuous, recommended) or "binned"
+    "knn": 4,                         # k for KSG estimator (3-5 typical; KSG 2004)
+    "n_bins": 6,                      # not used########
+    "k_history": 3,                   # Markov order of target's own past (k in TE)
+    "max_lag": 12,                    # scan source lags 1..max_lag (12 = 1yr monthly)
+
+    # ---- Inference ------------------------------------------------------------
+    "n_surrogates": 250,              # surrogates for full-sample lag scan
+    "rolling_surrogates": 100,        # surrogates per rolling window (speed)
+    "surrogate_method": "block",      # "block" (preserves source ACF) or "iid"
+    "block_length": None,             # None -> ceil(n ** (1/3))
+    "alpha": 0.05,                    # significance level
+
+    # ---- Rolling window -------------------------------------------------------
+    "obs_per_year": 12,               # 12 = monthly data, 4 = quarterly, 252 = daily
+    "rolling_years": 15,              # 10-year rolling window
+    "rolling_step": 1,                # step between windows (obs)
+
+    # ---- Misc -------------------------------------------------------------
+    "seed": 42,
+    "output_dir": "te_output",
+}
+
+
+
+# ------------------------------------------------------------------------------
+# Data loading & transformation
+# ------------------------------------------------------------------------------
+TRANSFORMS = ("level", "diff", "log_diff", "pct_change", "yoy_log_diff", "yoy_pct")
+
+
+def load_excel(cfg) -> pd.DataFrame:
+    df = pd.read_excel(cfg["excel_path"], sheet_name=cfg["sheet_name"])
+    for col in (cfg["date_col"], cfg["source_col"], cfg["target_col"]):
+        if col not in df.columns:
+            raise KeyError(
+                f"Column '{col}' not found. Available: {list(df.columns)}"
+            )
+    df[cfg["date_col"]] = pd.to_datetime(df[cfg["date_col"]])
+    df = (
+        df[[cfg["date_col"], cfg["source_col"], cfg["target_col"]]]
+        .dropna()
+        .sort_values(cfg["date_col"])
+        .set_index(cfg["date_col"])
+    )
+    df = df.apply(pd.to_numeric, errors="coerce").dropna()
+    if cfg.get("resample"):
+        df = df.resample(cfg["resample"]).last().dropna()
+    return df
+
+
+def transform_series(s: pd.Series, method: str, obs_per_year: int = 12) -> pd.Series:
+    m = method.lower()
+    if m == "level":
+        out = s.copy()
+    elif m == "diff":
+        out = s.diff()
+    elif m == "log_diff":
+        if (s <= 0).any():
+            raise ValueError(
+                f"'{s.name}': log_diff requires strictly positive values. "
+                "Use 'diff' or 'pct_change' instead."
+            )
+        out = np.log(s).diff()
+    elif m == "pct_change":
+        out = s.pct_change()
+    elif m == "yoy_log_diff":
+        out = np.log(s).diff(obs_per_year)
+    elif m == "yoy_pct":
+        out = s.pct_change(obs_per_year)
+    else:
+        raise ValueError(f"Unknown transform '{method}'. Options: {TRANSFORMS}")
+    return out.dropna()
+
+
+def stationarity_report(s: pd.Series, name: str) -> dict:
+    """ADF (H0: unit root) + KPSS (H0: stationary)."""
+    from statsmodels.tsa.stattools import adfuller, kpss
+
+    adf_stat, adf_p, *_ = adfuller(s.values, autolag="AIC")
+    try:
+        kpss_stat, kpss_p, *_ = kpss(s.values, regression="c", nlags="auto")
+    except Exception:
+        kpss_stat, kpss_p = np.nan, np.nan
+    verdict = (
+        "stationary" if (adf_p < 0.05 and (np.isnan(kpss_p) or kpss_p > 0.05))
+        else "CHECK -- possibly non-stationary"
+    )
+    return {
+        "series": name, "n": len(s),
+        "ADF stat": adf_stat, "ADF p": adf_p,
+        "KPSS stat": kpss_stat, "KPSS p": kpss_p,
+        "verdict": verdict,
+    }
+
+
+# ------------------------------------------------------------------------------
+# Core estimators
+# ------------------------------------------------------------------------------
+def _embed(y: np.ndarray, x: np.ndarray, lag: int, k: int):
+    """
+    Build (target-future, target-past, source-past) matrices for
+    TE_{X->Y}(lag) = I( y_t ; x_{t-lag} | y_{t-1},...,y_{t-k} ).
+    """
+    n = len(y)
+    start = max(k, lag)
+    idx = np.arange(start, n)
+    y_f = y[idx].reshape(-1, 1)                                   # y_t
+    y_p = np.column_stack([y[idx - j] for j in range(1, k + 1)])  # y_{t-1..t-k}
+    x_p = x[idx - lag].reshape(-1, 1)                             # x_{t-lag}
+    return y_f, y_p, x_p
+
+
+def ksg_cmi(a: np.ndarray, b: np.ndarray, c: np.ndarray,
+            knn: int = 4, rng: np.random.Generator | None = None) -> float:
+    """
+    Conditional mutual information I(A;B|C) in bits.
+    Frenzel & Pompe (2007) kNN estimator (KSG algorithm 1 style),
+    Chebyshev (max-norm) metric. Tiny jitter breaks ties (standard practice).
+    """
+    if rng is None:
+        rng = np.random.default_rng(0)
+    pts = [np.asarray(v, dtype=float) for v in (a, b, c)]
+    pts = [v + 1e-10 * np.std(v, axis=0, keepdims=True) * rng.standard_normal(v.shape)
+           for v in pts]
+    a, b, c = pts
+    abc = np.hstack([a, b, c])
+    ac = np.hstack([a, c])
+    bc = np.hstack([b, c])
+
+    n = abc.shape[0]
+    tree_abc = cKDTree(abc)
+    # distance to k-th neighbour in the full joint space (exclude self)
+    dists, _ = tree_abc.query(abc, k=knn + 1, p=np.inf)
+    eps = dists[:, -1]
+
+    def count_lt(space, eps_):
+        tree = cKDTree(space)
+        # strictly-less-than counts (KSG convention): shrink radius slightly
+        r = np.nextafter(eps_, 0)
+        return np.array(tree.query_ball_point(space, r, p=np.inf,
+                                              return_length=True)) - 1
+
+    n_ac = count_lt(ac, eps)
+    n_bc = count_lt(bc, eps)
+    n_c = count_lt(c, eps)
+
+    cmi_nats = (digamma(knn)
+                + np.mean(digamma(n_c + 1) - digamma(n_ac + 1) - digamma(n_bc + 1)))
+    return max(cmi_nats / np.log(2), 0.0)  # nats -> bits, clip tiny negatives
+
+
+def _quantile_discretize(v: np.ndarray, n_bins: int) -> np.ndarray:
+    """Equiprobable (quantile) binning per column -> integer symbols."""
+    v = np.asarray(v, dtype=float)
+    out = np.empty(v.shape, dtype=np.int64)
+    for j in range(v.shape[1]):
+        ranks = pd.Series(v[:, j]).rank(method="first").values
+        out[:, j] = np.minimum((ranks - 1) * n_bins // len(ranks), n_bins - 1)
+    return out
+
+
+def binned_cmi(a, b, c, n_bins: int = 6) -> float:
+    """Plug-in conditional MI in bits on quantile-binned data:
+       I(A;B|C) = H(A,C) + H(B,C) - H(C) - H(A,B,C)."""
+    A = _quantile_discretize(a, n_bins)
+    B = _quantile_discretize(b, n_bins)
+    C = _quantile_discretize(c, n_bins)
+
+    def H(*cols):
+        arr = np.hstack(cols)
+        _, counts = np.unique(arr, axis=0, return_counts=True)
+        p = counts / counts.sum()
+        return -(p * np.log2(p)).sum()
+
+    val = H(A, C) + H(B, C) - H(C) - H(A, B, C)
+    return max(val, 0.0)
+
+
+def transfer_entropy(x: np.ndarray, y: np.ndarray, lag: int, cfg,
+                     rng: np.random.Generator | None = None) -> float:
+    """TE_{X->Y} at a given lag, in bits."""
+    y_f, y_p, x_p = _embed(y, x, lag, cfg["k_history"])
+    if cfg["estimator"] == "ksg":
+        return ksg_cmi(y_f, x_p, y_p, knn=cfg["knn"], rng=rng)
+    return binned_cmi(y_f, x_p, y_p, n_bins=cfg["n_bins"])
+
+
+# ------------------------------------------------------------------------------
+# Surrogates, ETE, significance
+# ------------------------------------------------------------------------------
+def block_shuffle(x: np.ndarray, block_len: int, rng: np.random.Generator):
+    """Shuffle whole blocks of the source series: preserves within-block
+    autocorrelation while destroying the cross-series coupling."""
+    n = len(x)
+    nb = int(np.ceil(n / block_len))
+    pad = nb * block_len - n
+    xp = np.concatenate([x, x[:pad]]) if pad else x.copy()
+    blocks = xp.reshape(nb, block_len)
+    perm = rng.permutation(nb)
+    return blocks[perm].reshape(-1)[:n]
+
+
+def te_with_inference(x, y, lag, cfg, n_surr, rng) -> dict:
+    """TE, effective TE (bias-corrected), one-sided p-value, and the
+    (1-alpha) surrogate quantile threshold."""
+    te = transfer_entropy(x, y, lag, cfg, rng)
+    n = len(x)
+    bl = cfg["block_length"] or max(2, int(np.ceil(n ** (1 / 3))))
+    surr = np.empty(n_surr)
+    for i in range(n_surr):
+        xs = (block_shuffle(x, bl, rng) if cfg["surrogate_method"] == "block"
+              else rng.permutation(x))
+        surr[i] = transfer_entropy(xs, y, lag, cfg, rng)
+    p = (1 + np.sum(surr >= te)) / (1 + n_surr)          # Davison & Hinkley
+    return {
+        "te": te,
+        "ete": te - surr.mean(),                          # Marschinski & Matassini
+        "p": p,
+        "threshold": np.quantile(surr, 1 - cfg["alpha"]),
+        "surr_mean": surr.mean(),
+    }
+
+
+# ------------------------------------------------------------------------------
+# Analysis stages
+# ------------------------------------------------------------------------------
+def lag_scan(x, y, cfg, rng, label) -> pd.DataFrame:
+    rows = []
+    for lag in range(1, cfg["max_lag"] + 1):
+        r = te_with_inference(x, y, lag, cfg, cfg["n_surrogates"], rng)
+        rows.append({"lag": lag, **r})
+        print(f"    {label}  lag={lag:>2}  TE={r['te']:.5f}  "
+              f"ETE={r['ete']:+.5f}  p={r['p']:.4f}"
+              f"{'  *' if r['p'] < cfg['alpha'] else ''}")
+    return pd.DataFrame(rows)
+
+
+def pick_optimal_lag(scan: pd.DataFrame, alpha: float) -> tuple[int, bool]:
+    sig = scan[scan["p"] < alpha]
+    if len(sig):
+        return int(sig.loc[sig["ete"].idxmax(), "lag"]), True
+    return int(scan.loc[scan["ete"].idxmax(), "lag"]), False
+
+
+def rolling_te(x: pd.Series, y: pd.Series, lag: int, cfg, rng, label) -> pd.DataFrame:
+    w = cfg["rolling_years"] * cfg["obs_per_year"]
+    step = cfg["rolling_step"]
+    xv, yv = x.values, y.values
+    n = len(xv)
+    if n < w + lag + cfg["k_history"] + 10:
+        raise ValueError(
+            f"Not enough observations ({n}) for a "
+            f"{cfg['rolling_years']}-year ({w}-obs) rolling window."
+        )
+    rows = []
+    ends = range(w, n + 1, step)
+    for j, end in enumerate(ends):
+        xs, ys = xv[end - w:end], yv[end - w:end]
+        r = te_with_inference(xs, ys, lag, cfg, cfg["rolling_surrogates"], rng)
+        rows.append({"date": y.index[end - 1], **r})
+        if (j + 1) % 50 == 0:
+            print(f"    {label}: window {j + 1}/{len(list(ends))}")
+    return pd.DataFrame(rows).set_index("date")
+
+
+# ------------------------------------------------------------------------------
+# Plotting
+# ------------------------------------------------------------------------------
+plt.rcParams.update({
+    "figure.dpi": 130, "font.size": 9.5, "axes.grid": True,
+    "grid.alpha": 0.3, "axes.spines.top": False, "axes.spines.right": False,
+})
+
+
+def plot_lag_scan(scan_xy, scan_yx, sname, tname, cfg, path):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
+    for ax, scan, title in (
+        (axes[0], scan_xy, f"{sname} → {tname}"),
+        (axes[1], scan_yx, f"{tname} → {sname}"),
+    ):
+        colors = ["#c0392b" if p < cfg["alpha"] else "#95a5a6" for p in scan["p"]]
+        ax.bar(scan["lag"], scan["ete"], color=colors, width=0.7,
+               label="Effective TE (bias-corrected)")
+        ax.plot(scan["lag"], scan["threshold"] - scan["surr_mean"], "k--", lw=1,
+                label=f"{int((1-cfg['alpha'])*100)}% surrogate threshold (centred)")
+        ax.axhline(0, color="k", lw=0.8)
+        ax.set_title(title)
+        ax.set_xlabel("lag (periods)")
+    axes[0].set_ylabel("Effective transfer entropy (bits)")
+    axes[0].legend(fontsize=8, loc="upper right")
+    fig.suptitle("Lag scan — red bars significant at "
+                 f"α={cfg['alpha']} (block-shuffle surrogates)", y=1.02)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_rolling(roll_xy, roll_yx, lag_xy, lag_yx, sname, tname, cfg, path):
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+    for ax, roll, title in (
+        (axes[0], roll_xy, f"{sname} → {tname}   (lag {lag_xy})"),
+        (axes[1], roll_yx, f"{tname} → {sname}   (lag {lag_yx})"),
+    ):
+        ax.plot(roll.index, roll["ete"], color="#1f4e79", lw=1.6,
+                label="Effective TE (bias-corrected)")
+        ax.plot(roll.index, roll["threshold"] - roll["surr_mean"],
+                color="#c0392b", lw=1, ls="--",
+                label=f"{int((1-cfg['alpha'])*100)}% significance threshold")
+        sig = roll["p"] < cfg["alpha"]
+        ax.fill_between(roll.index, 0, roll["ete"].clip(lower=0),
+                        where=sig, color="#1f4e79", alpha=0.18,
+                        label="significant windows")
+        ax.axhline(0, color="k", lw=0.8)
+        ax.set_title(title)
+        ax.set_ylabel("ETE (bits)")
+        ax.legend(fontsize=8, loc="upper left")
+    axes[1].set_xlabel("window end date")
+    fig.suptitle(f"{cfg['rolling_years']}-year rolling effective transfer entropy",
+                 y=1.0)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------------------
+# Orchestration
+# ------------------------------------------------------------------------------
+def run_analysis(df: pd.DataFrame, cfg) -> None:
+    rng = np.random.default_rng(cfg["seed"])
+    os.makedirs(cfg["output_dir"], exist_ok=True)
+    sname, tname = cfg["source_col"], cfg["target_col"]
+
+    print("=" * 78)
+    print(f"TRANSFER ENTROPY ANALYSIS: {sname}  <->  {tname}")
+    print("=" * 78)
+
+    # 1) Transform ------------------------------------------------------------
+    x = transform_series(df[sname], cfg["source_transform"], cfg["obs_per_year"])
+    y = transform_series(df[tname], cfg["target_transform"], cfg["obs_per_year"])
+    joint = pd.concat([x.rename("x"), y.rename("y")], axis=1).dropna()
+    x, y = joint["x"], joint["y"]
+    if cfg["standardize"]:
+        x = (x - x.mean()) / x.std()
+        y = (y - y.mean()) / y.std()
+    print(f"\n[1] Data: {len(joint)} aligned observations, "
+          f"{joint.index[0].date()} – {joint.index[-1].date()}")
+    print(f"    {sname}: transform = {cfg['source_transform']}   "
+          f"{tname}: transform = {cfg['target_transform']}")
+
+    # 2) Stationarity ----------------------------------------------------------
+    print("\n[2] Stationarity diagnostics (transformed series)")
+    stat_rows = [stationarity_report(x, sname), stationarity_report(y, tname)]
+    stat_df = pd.DataFrame(stat_rows)
+    for r in stat_rows:
+        print(f"    {r['series']:<12} ADF p={r['ADF p']:.4f}  "
+              f"KPSS p={r['KPSS p']:.4f}  ->  {r['verdict']}")
+    stat_df.to_csv(os.path.join(cfg["output_dir"], "stationarity.csv"), index=False)
+
+    # 3) Lag scan (both directions) ---------------------------------------------
+    print(f"\n[3] Full-sample lag scan (1..{cfg['max_lag']}), "
+          f"{cfg['n_surrogates']} {cfg['surrogate_method']}-shuffle surrogates, "
+          f"estimator = {cfg['estimator'].upper()}")
+    xv, yv = x.values, y.values
+    scan_xy = lag_scan(xv, yv, cfg, rng, f"{sname}->{tname}")
+    scan_yx = lag_scan(yv, xv, cfg, rng, f"{tname}->{sname}")
+    scan_xy.to_csv(os.path.join(cfg["output_dir"], "lag_scan_X_to_Y.csv"), index=False)
+    scan_yx.to_csv(os.path.join(cfg["output_dir"], "lag_scan_Y_to_X.csv"), index=False)
+
+    lag_xy, sig_xy = pick_optimal_lag(scan_xy, cfg["alpha"])
+    lag_yx, sig_yx = pick_optimal_lag(scan_yx, cfg["alpha"])
+    row_xy = scan_xy.set_index("lag").loc[lag_xy]
+    row_yx = scan_yx.set_index("lag").loc[lag_yx]
+
+    print(f"\n    Optimal lag {sname}->{tname}: {lag_xy} "
+          f"(ETE={row_xy['ete']:.5f} bits, p={row_xy['p']:.4f}"
+          f"{', SIGNIFICANT' if sig_xy else ', not significant'})")
+    print(f"    Optimal lag {tname}->{sname}: {lag_yx} "
+          f"(ETE={row_yx['ete']:.5f} bits, p={row_yx['p']:.4f}"
+          f"{', SIGNIFICANT' if sig_yx else ', not significant'})")
+
+    plot_lag_scan(scan_xy, scan_yx, sname, tname, cfg,
+                  os.path.join(cfg["output_dir"], "lag_scan.png"))
+
+    # 4) Rolling TE ---------------------------------------------------------------
+    print(f"\n[4] {cfg['rolling_years']}-year rolling ETE "
+          f"(window = {cfg['rolling_years'] * cfg['obs_per_year']} obs, "
+          f"{cfg['rolling_surrogates']} surrogates/window)")
+    roll_xy = rolling_te(x, y, lag_xy, cfg, rng, f"{sname}->{tname}")
+    roll_yx = rolling_te(y, x, lag_yx, cfg, rng, f"{tname}->{sname}")
+    roll_xy.to_csv(os.path.join(cfg["output_dir"], "rolling_te_X_to_Y.csv"))
+    roll_yx.to_csv(os.path.join(cfg["output_dir"], "rolling_te_Y_to_X.csv"))
+    plot_rolling(roll_xy, roll_yx, lag_xy, lag_yx, sname, tname, cfg,
+                 os.path.join(cfg["output_dir"], "rolling_te.png"))
+
+    # 5) Summary / interpretation ---------------------------------------------------
+    frac_sig_xy = (roll_xy["p"] < cfg["alpha"]).mean()
+    frac_sig_yx = (roll_yx["p"] < cfg["alpha"]).mean()
+    lines = [
+        "=" * 78,
+        "SUMMARY -- predictive-information viability",
+        "=" * 78,
+        f"Sample: {joint.index[0].date()} to {joint.index[-1].date()} "
+        f"({len(joint)} obs)",
+        f"Estimator: {cfg['estimator'].upper()}  |  target history k="
+        f"{cfg['k_history']}  |  alpha={cfg['alpha']}",
+        "",
+        f"{sname} -> {tname}: optimal lag {lag_xy}, "
+        f"ETE = {row_xy['ete']:.5f} bits, p = {row_xy['p']:.4f} "
+        f"({'significant' if sig_xy else 'NOT significant'}); "
+        f"{frac_sig_xy:.0%} of rolling windows significant.",
+        f"{tname} -> {sname}: optimal lag {lag_yx}, "
+        f"ETE = {row_yx['ete']:.5f} bits, p = {row_yx['p']:.4f} "
+        f"({'significant' if sig_yx else 'NOT significant'}); "
+        f"{frac_sig_yx:.0%} of rolling windows significant.",
+        "",
+        "Interpretation guide:",
+        "  * ETE > 0 with p < alpha  =>  the source's past carries information",
+        "    about the target beyond the target's own history (predictive",
+        "    viability in the information-theoretic sense).",
+        "  * Compare directions: a large asymmetry indicates the dominant",
+        "    direction of information flow.",
+        "  * Rolling plot: information transfer in economic/financial data is",
+        "    typically episodic -- viability should be judged by WHEN the flow",
+        "    is significant (regimes), not only by the full-sample number.",
+        "  * Caveats: TE is bivariate here -- a third variable driving both",
+        "    series can induce apparent flow (consider conditioning candidates);",
+        "    significance does not guarantee out-of-sample profitability.",
+    ]
+    summary = "\n".join(lines)
+    print("\n" + summary)
+    with open(os.path.join(cfg["output_dir"], "summary.txt"), "w") as f:
+        f.write(summary + "\n")
+    print(f"\nAll outputs written to: {os.path.abspath(cfg['output_dir'])}/")
+
+
+# ------------------------------------------------------------------------------
+# Self-test on synthetic data with a KNOWN causal structure
+# ------------------------------------------------------------------------------
+def make_synthetic(n=660, true_lag=3, coupling=1.0, seed=7) -> pd.DataFrame:
+    """X: AR(1). Y: driven by X at `true_lag` plus own AR(1). Coupling turned
+    OFF in the middle third so the rolling plot has a visible regime break."""
+    rng = np.random.default_rng(seed)
+    x = np.zeros(n)
+    y = np.zeros(n)
+    for t in range(1, n):
+        x[t] = 0.4 * x[t - 1] + rng.standard_normal()
+    regime = np.ones(n)
+    regime[n // 3: 2 * n // 3] = 0.0        # coupling switched off mid-sample
+    for t in range(true_lag, n):
+        y[t] = (0.3 * y[t - 1]
+                + coupling * regime[t] * x[t - true_lag]
+                + rng.standard_normal())
+    dates = pd.date_range("1971-01-31", periods=n, freq="ME")
+    # exponentiate so the series look like positive "price/index levels"
+    return pd.DataFrame({
+        "DATE": dates,
+        "WTI": np.exp(np.cumsum(x) * 0.02 + 3),
+        "CPI": np.exp(np.cumsum(y) * 0.005 + 4),
+    })
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Research-grade transfer entropy test")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run on synthetic data with known causality "
+                         "(X -> Y at lag 3, coupling off mid-sample)")
+    ap.add_argument("--excel", type=str, default=None, help="override excel_path")
+    ap.add_argument("--source", type=str, default=None, help="override source_col")
+    ap.add_argument("--target", type=str, default=None, help="override target_col")
+    args = ap.parse_args()
+
+    cfg = dict(CONFIG)
+    if args.excel:
+        cfg["excel_path"] = args.excel
+    if args.source:
+        cfg["source_col"] = args.source
+    if args.target:
+        cfg["target_col"] = args.target
+
+    if args.selftest:
+        print(">> SELF-TEST: synthetic X->Y coupling at lag 3; "
+              "coupling disabled in the middle third of the sample.\n")
+        cfg["output_dir"] = "te_output_selftest"
+        df = make_synthetic()
+        # write it to Excel and read it back, to exercise the full pipeline
+        path = os.path.join("/tmp", "te_selftest.xlsx")
+        df.to_excel(path, index=False)
+        cfg["excel_path"] = path
+        df = load_excel(cfg)
+    else:
+        if not os.path.exists(cfg["excel_path"]):
+            sys.exit(f"Excel file not found: {cfg['excel_path']}\n"
+                     "Edit CONFIG['excel_path'] or pass --excel PATH. "
+                     "Run with --selftest to validate the installation.")
+        df = load_excel(cfg)
+
+    run_analysis(df, cfg)
+
+
+if __name__ == "__main__":
+    main()
