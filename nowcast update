@@ -1,0 +1,683 @@
+"""
+================================================================================
+BVAR GDP GROWTH FORECASTING -- Minnesota prior, quarterly, plug-and-play
+================================================================================
+Bayesian VAR for forecasting US real GDP growth from a daily "as-known"
+(point-in-time, forward-filled) Excel panel, resampled to quarter-end.
+
+Methodology (with citations):
+  * Minnesota prior implemented via dummy observations:
+        Litterman (1986); Doan, Litterman & Sims (1984);
+        Banbura, Giannone & Reichlin (2010, JAE) -- "large BVAR" construction.
+    Own-lag prior mean delta_i (1 = random walk for persistent levels,
+    0 = white noise for growth rates / differenced data), overall tightness
+    lambda, harmonic lag decay l^d, scale sigma_i from univariate AR
+    residual standard deviations.
+  * Sum-of-coefficients ("no-cointegration") prior and dummy-initial-
+    observation ("co-persistence") prior: Doan et al. (1984); Sims (1993);
+    Sims & Zha (1998).
+  * Hyperparameter selection by maximizing the marginal likelihood
+    (closed form under the conjugate Normal-Inverse-Wishart):
+        Giannone, Lenza & Primiceri (2015, REStat).
+  * Conjugate NIW posterior -> exact Monte Carlo (no MCMC needed):
+        Sigma ~ IW, B | Sigma ~ Matrix-Normal; density forecasts include
+        both parameter and shock uncertainty (Karlsson 2013, Handbook ch.).
+  * COVID outliers handled with observation dummies (loose prior), in the
+    spirit of Lenza & Primiceri (2022, JAE): extreme pandemic observations
+    should not distort the transmission coefficients.
+  * Out-of-sample evaluation: recursive (expanding window) pseudo-real-time
+    backtest vs. AR(4) and historical-mean benchmarks; RMSE ratios and
+    interval coverage.
+
+USAGE
+-----
+1) Edit CONFIG (file path, columns, transforms).
+2) python bvar_gdp.py            (your data)
+   python bvar_gdp.py --selftest (synthetic daily panel with known structure)
+Outputs (fan chart PNG, OOS PNG, CSVs, summary) -> CONFIG["output_dir"].
+
+EXPECTED DATA LAYOUT
+--------------------
+One date column (daily), one column per series. Daily rows where each
+series holds its latest released value ("dragged down"). The script
+resamples to quarter-end ("QE") taking the last known value per quarter
+(config per column: "last" or "mean").
+
+IMPORTANT -- TARGET ALIGNMENT: the GDP column in a dragged panel shows the
+latest *published* GDP at each date, which references a PREVIOUS quarter.
+Set "target_release_shift_q" to realign it to its reference quarter
+(typically 1 if your dragged GDP updates with the advance estimate).
+See the accompanying notes.
+================================================================================
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import warnings
+
+import numpy as np
+import pandas as pd
+from numpy.linalg import slogdet
+from scipy.special import multigammaln
+from scipy import stats
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore")
+
+ 
+
+#Config
+
+CONFIG = {
+    # ---- Data -----------------------------------------------------------------
+    "excel_path": r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\Dataframe.xlsx",
+    "sheet_name": 0,
+    "date_col": "Date",
+
+    # Target (GDP). If your column is the LEVEL of real GDP, use transform
+    # "ann_log_growth" (400 * dlog = q/q SAAR growth). If it is already a
+    # growth rate, use "level".
+    "target_col": "GDP Growth",
+    "target_transform": "level",
+    # Dragged (as-known) GDP references an earlier quarter. Shift the resampled
+    # quarterly series BACK by this many quarters to align values with their
+    # reference quarter. 1 = advance estimate published one quarter later.
+    # Set 0 if your GDP column is already aligned by reference quarter.
+    "target_release_shift_q": 1,
+
+    # Predictors: {column: {"transform": ..., "agg": "last"|"mean"}}
+    # transforms: level, diff, log_diff, ann_log_growth, yoy_log_diff, pct_change
+    # agg: how daily -> quarterly ("last" = value known at quarter end,
+    #      "mean" = quarter average of the daily as-known values)
+    "predictors": {
+        "PCE":  {"transform": "level", "agg": "mean"},
+        "Unemployment":  {"transform": "level", "agg": "last"},
+        "Exports Raw":   {"transform": "log_diff",          "agg": "mean"},
+        "INDPROD": {"transform": "level", "agg": "last" },
+        "Corporate Credit Spreads": {"transform": "level", "agg": "mean"}
+    },
+
+    # ---- Model ----------------------------------------------------------------
+    "n_lags": 4,                      # quarterly VAR lags (4-5 standard)
+    # Prior mean on own first lag: "auto" -> 0 for differenced/growth
+    # transforms, 0.9 for "level" transforms (persistent). Or a dict per col.
+    "prior_mean_delta": "auto",
+    "lag_decay": 2.0,                 # harmonic decay exponent d (l^d)
+
+    # Hyperparameters: grid-searched by marginal likelihood (GLP 2015)
+    "lambda_grid": [0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0],
+    "soc_grid":    [0.5, 1.0, 5.0, None],   # sum-of-coefficients mu (None=off)
+    "dio_grid":    [1.0, None],             # dummy-initial-observation tau
+
+    # COVID / outlier observation dummies (Lenza-Primiceri spirit):
+    # list of quarters that get their own loose-prior dummy variable.
+    "outlier_dummies": ["2020Q2", "2020Q3"],
+
+    # ---- Forecasting ------------------------------------------------------------
+    "horizon": 8,                     # quarters ahead
+    "n_draws": 6000,                  # posterior/predictive draws
+    "bands": [0.68, 0.90],            # fan chart credible bands
+
+    # ---- Out-of-sample backtest -------------------------------------------------
+    "oos_start": "2012-01-01",        # first forecast origin
+    "oos_horizons": [1, 4],           # evaluate h=1 and h=4
+    "reoptimize_each_step": True,    # re-run hyperparameter search each origin
+
+    
+    "seed": 42,
+    "output_dir": r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\New folder (3)",
+}
+
+
+
+
+
+
+# Data handling
+
+def _q_resample(s: pd.Series, how: str) -> pd.Series:
+    try:
+        r = s.resample("QE")
+    except ValueError:                       # older pandas lib
+        r = s.resample("Q")
+    return r.mean() if how == "mean" else r.last()
+
+
+def transform(s: pd.Series, method: str) -> pd.Series:
+    m = method.lower()
+    if m == "level":
+        return s
+    if m == "diff":
+        return s.diff()
+    if m == "log_diff":
+        return np.log(s).diff()
+    if m == "ann_log_growth":                # q/q SAAR, percent
+        return 400.0 * np.log(s).diff()
+    if m == "yoy_log_diff":
+        return 100.0 * np.log(s).diff(4)
+    if m == "pct_change":
+        return 100.0 * s.pct_change()
+    raise ValueError(f"unknown transform {method}")
+
+
+def is_growth_like(method: str) -> bool:
+    return method.lower() in ("diff", "log_diff", "ann_log_growth",
+                              "yoy_log_diff", "pct_change")
+
+
+def load_quarterly(cfg) -> pd.DataFrame:
+    df = pd.read_excel(cfg["excel_path"], sheet_name=cfg["sheet_name"])
+    df[cfg["date_col"]] = pd.to_datetime(df[cfg["date_col"]])
+    df = df.set_index(cfg["date_col"]).sort_index()
+    df = df[df.index <= "2026-06-30"]
+    cols = [cfg["target_col"]] + list(cfg["predictors"].keys())
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"columns not found: {missing}; available: {list(df.columns)}")
+
+    out = {}
+    # target: quarterly last-known, realigned to reference quarter, transformed
+    tq = _q_resample(df[cfg["target_col"]].ffill(), "last")
+    shift = int(cfg.get("target_release_shift_q", 0))
+    if shift:
+        tq = tq.shift(-shift)               
+    out[cfg["target_col"]] = transform(tq, cfg["target_transform"])
+
+    for c, spec in cfg["predictors"].items():
+        q = _q_resample(df[c].ffill(), spec.get("agg", "last"))
+        out[c] = transform(q, spec["transform"])
+
+    Y = pd.DataFrame(out).dropna()
+    return Y
+
+
+
+# Minnesota-prior BVAR via dummy observations (Banbura et al. 2010)
+
+def ar_resid_sigmas(Y: np.ndarray, p: int) -> np.ndarray:
+    """Scale parameters sigma_i: residual std of univariate AR(p) per series."""
+    T, n = Y.shape
+    sig = np.empty(n)
+    for i in range(n):
+        y = Y[:, i]
+        X = np.column_stack([y[p - l - 1:T - l - 1] for l in range(p)]
+                            + [np.ones(T - p)])
+        yy = y[p:]
+        beta, *_ = np.linalg.lstsq(X, yy, rcond=None)
+        r = yy - X @ beta
+        sig[i] = max(np.std(r, ddof=X.shape[1]), 1e-8)
+    return sig
+
+
+def build_dummies(n, p, sig, delta, lam, decay, soc_mu, dio_tau, ybar,
+                  n_exog) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Dummy observations encoding the priors. Regressor ordering:
+    [lag1 vars ... lagp vars, intercept, exog dummies].
+    """
+    k = n * p + 1 + n_exog
+    rows_Y, rows_X = [], []
+
+    # (1) Minnesota prior on lag coefficients
+    for l in range(1, p + 1):
+        Yd = np.zeros((n, n))
+        Xd = np.zeros((n, k))
+        for i in range(n):
+            scale = sig[i] * (l ** decay) / lam
+            if l == 1:
+                Yd[i, i] = delta[i] * scale
+            Xd[i, (l - 1) * n + i] = scale
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    # (2) prior on Sigma (n rows)
+    Yd = np.diag(sig)
+    Xd = np.zeros((n, k))
+    rows_Y.append(Yd); rows_X.append(Xd)
+
+    # (3) loose prior on intercept and exog dummies (tiny precision)
+    eps = 1e-4
+    for j in range(1 + n_exog):
+        Yd = np.zeros((1, n))
+        Xd = np.zeros((1, k))
+        Xd[0, n * p + j] = eps
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    # (4) sum-of-coefficients prior (Doan/Sims), mu -> 0 = tight
+    if soc_mu is not None:
+        Yd = np.diag(delta * ybar) / soc_mu
+        Xd = np.zeros((n, k))
+        for l in range(p):
+            Xd[:, l * n:(l + 1) * n] = np.diag(delta * ybar) / soc_mu
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    # (5) dummy initial observation (Sims co-persistence)
+    if dio_tau is not None:
+        Yd = (ybar / dio_tau).reshape(1, n)
+        Xd = np.zeros((1, k))
+        for l in range(p):
+            Xd[0, l * n:(l + 1) * n] = ybar / dio_tau
+        Xd[0, n * p] = 1.0 / dio_tau
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    return np.vstack(rows_Y), np.vstack(rows_X)
+
+
+def design_matrices(Y: np.ndarray, p: int, exog: np.ndarray | None):
+    T, n = Y.shape
+    X = np.column_stack([Y[p - l - 1:T - l - 1, :] for l in range(p)]
+                        + [np.ones((T - p, 1))])
+    if exog is not None:
+        X = np.column_stack([X, exog[p:]])
+    return Y[p:], X
+
+
+class MinnesotaBVAR:
+    def __init__(self, p, lam, decay, soc_mu, dio_tau, delta):
+        self.p, self.lam, self.decay = p, lam, decay
+        self.soc_mu, self.dio_tau, self.delta = soc_mu, dio_tau, delta
+
+    def fit(self, Y: np.ndarray, exog: np.ndarray | None = None):
+        p = self.p
+        T, n = Y.shape
+        self.n = n
+        self.n_exog = 0 if exog is None else exog.shape[1]
+        sig = ar_resid_sigmas(Y, p)
+        ybar = Y[:p].mean(axis=0)
+        Yd, Xd = build_dummies(n, p, sig, self.delta, self.lam, self.decay,
+                               self.soc_mu, self.dio_tau, ybar, self.n_exog)
+        Yt, Xt = design_matrices(Y, p, exog)
+        Ys, Xs = np.vstack([Yt, Yd]), np.vstack([Xt, Xd])
+
+        XtX = Xs.T @ Xs
+        self.XtX_inv = np.linalg.inv(XtX + 1e-10 * np.eye(XtX.shape[0]))
+        self.B_post = self.XtX_inv @ Xs.T @ Ys
+        R = Ys - Xs @ self.B_post
+        self.S_post = R.T @ R
+        self.dof = Yt.shape[0] + Yd.shape[0] - Xs.shape[1]
+        # store pieces for marginal likelihood
+        self._ml_pieces = (Yd, Xd, Yt, Xt)
+        self.k = Xs.shape[1]
+        return self
+
+ 
+    def log_ml(self) -> float:
+        Yd, Xd, Yt, Xt = self._ml_pieces
+        n = self.n; k = self.k
+        Td, T = Yd.shape[0], Yt.shape[0]
+
+        def niw_pieces(Ya, Xa):
+            XtX = Xa.T @ Xa + 1e-10 * np.eye(k)
+            B = np.linalg.solve(XtX, Xa.T @ Ya)
+            R = Ya - Xa @ B
+            S = R.T @ R + 1e-10 * np.eye(n)
+            return slogdet(XtX)[1], slogdet(S)[1]
+
+        ld_X0, ld_S0 = niw_pieces(Yd, Xd)
+        ld_X1, ld_S1 = niw_pieces(np.vstack([Yt, Yd]), np.vstack([Xt, Xd]))
+        a0 = (Td - k)
+        a1 = (Td + T - k)
+        if a0 <= n or a1 <= n:
+            return -np.inf
+        lml = (-0.5 * n * T * np.log(np.pi)
+               + multigammaln(a1 / 2, n) - multigammaln(a0 / 2, n)
+               + 0.5 * n * (ld_X0 - ld_X1)
+               + 0.5 * (a0 * ld_S0 - a1 * ld_S1))
+        return float(lml)
+
+
+    def sample_forecasts(self, Y, exog, horizon, n_draws, rng,
+                         exog_future=None) -> np.ndarray:
+        """Returns draws of future paths: (n_draws, horizon, n)."""
+        p, n = self.p, self.n
+        chol_XtX = np.linalg.cholesky(self.XtX_inv + 1e-12 * np.eye(self.k))
+        out = np.empty((n_draws, horizon, n))
+        hist = Y[-p:].copy()
+        for d in range(n_draws):
+            Sigma = stats.invwishart.rvs(df=max(self.dof, n + 2),
+                                         scale=self.S_post, random_state=rng)
+            Sigma = np.atleast_2d(Sigma)
+            cS = np.linalg.cholesky(Sigma + 1e-12 * np.eye(n))
+            B = self.B_post + chol_XtX @ rng.standard_normal((self.k, n)) @ cS.T
+            lags = hist.copy()
+            for h in range(horizon):
+                x = np.concatenate([lags[-l - 1] for l in range(p)] + [[1.0]])
+                if self.n_exog:
+                    xf = (exog_future[h] if exog_future is not None
+                          else np.zeros(self.n_exog))
+                    x = np.concatenate([x, xf])
+                mean = x @ B
+                shock = cS @ rng.standard_normal(n)
+                ynew = mean + shock
+                lags = np.vstack([lags, ynew])
+            out[d] = lags[p:]
+        return out
+
+
+
+# Hyperparameter search (marginal likelihood grid, GLP 2015)
+
+def select_hyperparams(Y, exog, cfg, delta, verbose=True):
+    best = (-np.inf, None)
+    for lam in cfg["lambda_grid"]:
+        for mu in cfg["soc_grid"]:
+            for tau in cfg["dio_grid"]:
+                m = MinnesotaBVAR(cfg["n_lags"], lam, cfg["lag_decay"],
+                                  mu, tau, delta).fit(Y, exog)
+                lml = m.log_ml()
+                if lml > best[0]:
+                    best = (lml, (lam, mu, tau))
+    lam, mu, tau = best[1]
+    if verbose:
+        print(f"    selected: lambda={lam}, soc_mu={mu}, dio_tau={tau} "
+              f"(log-ML={best[0]:.2f})")
+    return lam, mu, tau
+
+
+
+
+def nowcast_q(m, Yq, obs, n_draws, rng, exog_now = None):
+    """ on estep GDP Nowcast conditional on observed Q2 Predictor values"""
+    p, n, cols = m.p, m.n, list(Yq.columns)
+    tgt_i = 0 
+    oi = [cols.index(c) for c in obs]
+    yo= np.array([obs[c] for c in obs])
+    x = np.concatenate([Yq.values[-l-1] for l in range(p)] + [[1.0]])
+    if m.n_exog:
+        x = np.concatenate([x, exog_now if exog_now is not None 
+                                            else np.zeros(m.n_exog)])
+    cX = np.linalg.cholesky(m.XtX_inv + 1e-12*np.eye(m.k))
+    out = np.empty(n_draws)
+    for d in range(n_draws):
+        Sig = np.atleast_2d(stats.invwishart.rvs(
+            df=max(m.dof, n+2), scale=m.S_post, random_state=rng))
+        B = m.B_post + cX @ rng.standard_normal((m.k, n)) @ \
+                    np.linalg.cholesky(Sig + 1e-12*np.eye(n)).T   
+        mu = x@ B
+        S22 = Sig[np.ix_(oi, oi)]
+        S12 = Sig[tgt_i, oi]
+        cm = mu[tgt_i]+ S12 @ np.linalg.solve(S22, yo - mu[oi])
+        cv = Sig[tgt_i, tgt_i] - S12 @ np.linalg.solve(S22, S12)
+        out[d] = cm+np.sqrt(max(cv, 1e-12)) *rng.standard_normal()
+        return out
+        
+
+
+
+
+# da backtest for real
+def ar_benchmark_forecast(y: np.ndarray, p: int, h: int) -> float:
+    """Iterated AR(p) OLS forecast h steps ahead."""
+    T = len(y)
+    X = np.column_stack([y[p - l - 1:T - l - 1] for l in range(p)]
+                        + [np.ones(T - p)])
+    beta, *_ = np.linalg.lstsq(X, y[p:], rcond=None)
+    hist = list(y[-p:])
+    for _ in range(h):
+        x = np.array(hist[::-1][:p] + [1.0])
+        hist.append(float(x @ beta))
+    return hist[-1]
+
+
+def run_backtest(Yq: pd.DataFrame, exog_df: pd.DataFrame | None, cfg,
+                 delta, hyper, rng):
+    tcol = cfg["target_col"]
+    lam, mu, tau = hyper
+    origins = Yq.index[Yq.index >= pd.Timestamp(cfg["oos_start"])]
+    rows = []
+    Hmax = max(cfg["oos_horizons"])
+    for t0 in origins:
+        i0 = Yq.index.get_loc(t0)
+        if i0 + Hmax >= len(Yq):
+            break
+        Ytr = Yq.iloc[:i0 + 1]
+        Etr = exog_df.iloc[:i0 + 1].values if exog_df is not None else None
+        if cfg["reoptimize_each_step"]:
+            lam, mu, tau = select_hyperparams(Ytr.values, Etr, cfg, delta,
+                                              verbose=False)
+        m = MinnesotaBVAR(cfg["n_lags"], lam, cfg["lag_decay"],
+                          mu, tau, delta).fit(Ytr.values, Etr)
+        draws = m.sample_forecasts(Ytr.values, Etr, Hmax, 600, rng)
+        j = list(Yq.columns).index(tcol)
+        for h in cfg["oos_horizons"]:
+            fc = draws[:, h - 1, j]
+            actual = Yq[tcol].iloc[i0 + h]
+            rows.append({
+                "origin": t0, "h": h, "actual": actual,
+                "bvar_mean": fc.mean(),
+                "bvar_lo68": np.quantile(fc, 0.16),
+                "bvar_hi68": np.quantile(fc, 0.84),
+                "ar4": ar_benchmark_forecast(Ytr[tcol].values, 4, h),
+                "hist_mean": Ytr[tcol].mean(),
+            })
+    bt = pd.DataFrame(rows)
+    return bt
+
+
+def backtest_summary(bt: pd.DataFrame, cfg) -> str:
+    lines = []
+    for h in cfg["oos_horizons"]:
+        b = bt[bt["h"] == h]
+        rmse = lambda c: np.sqrt(np.mean((b["actual"] - b[c]) ** 2))
+        r_bvar, r_ar, r_mean = rmse("bvar_mean"), rmse("ar4"), rmse("hist_mean")
+        cov = np.mean((b["actual"] >= b["bvar_lo68"])
+                      & (b["actual"] <= b["bvar_hi68"]))
+        lines.append(
+            f"  h={h}: BVAR RMSE={r_bvar:.3f} | AR(4)={r_ar:.3f} "
+            f"(ratio {r_bvar / r_ar:.3f}) | mean={r_mean:.3f} "
+            f"(ratio {r_bvar / r_mean:.3f}) | 68% coverage={cov:.0%} "
+            f"| n={len(b)}"
+        )
+    return "\n".join(lines)
+
+
+
+plt.rcParams.update({
+    "figure.dpi": 130, "font.size": 9.5, "axes.grid": True,
+    "grid.alpha": 0.3, "axes.spines.top": False, "axes.spines.right": False,
+})
+
+
+def plot_fan(Yq, draws, cfg, path):
+    tcol = cfg["target_col"]
+    j = list(Yq.columns).index(tcol)
+    hist = Yq[tcol].iloc[-24:]
+    fdates = pd.period_range(Yq.index[-1], periods=cfg["horizon"] + 1,
+                             freq="Q")[1:].to_timestamp(how="end")
+    fc = draws[:, :, j]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(hist.index, hist.values, color="#1f4e79", lw=1.6, label="actual")
+    med = np.median(fc, axis=0)
+    ax.plot(fdates, med, color="#c0392b", lw=1.8, label="BVAR median")
+    shades = [0.30, 0.15]
+    for band, alp in zip(sorted(cfg["bands"]), shades):
+        lo = np.quantile(fc, (1 - band) / 2, axis=0)
+        hi = np.quantile(fc, 1 - (1 - band) / 2, axis=0)
+        ax.fill_between(fdates, lo, hi, color="#c0392b", alpha=alp,
+                        label=f"{int(band * 100)}% band")
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_title(f"BVAR density forecast: {tcol} "
+                 f"({cfg['target_transform']}, quarterly)")
+    ax.set_ylabel("percent")
+    ax.legend(fontsize=8)
+    fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+
+
+def plot_oos(bt, cfg, path):
+    fig, axes = plt.subplots(len(cfg["oos_horizons"]), 1,
+                             figsize=(10, 4 * len(cfg["oos_horizons"])),
+                             sharex=True, squeeze=False)
+    for ax, h in zip(axes[:, 0], cfg["oos_horizons"]):
+        b = bt[bt["h"] == h]
+        ax.plot(b["origin"], b["actual"], color="k", lw=1.4, label="actual")
+        ax.plot(b["origin"], b["bvar_mean"], color="#c0392b", lw=1.4,
+                label="BVAR")
+        ax.fill_between(b["origin"], b["bvar_lo68"], b["bvar_hi68"],
+                        color="#c0392b", alpha=0.18, label="68% band")
+        ax.plot(b["origin"], b["ar4"], color="#7f8c8d", lw=1.1, ls="--",
+                label="AR(4)")
+        ax.set_title(f"Recursive out-of-sample, h={h}")
+        ax.legend(fontsize=8)
+    fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+
+
+
+def run(cfg):
+    rng = np.random.default_rng(cfg["seed"])
+    os.makedirs(cfg["output_dir"], exist_ok=True)
+    tcol = cfg["target_col"]
+
+    print("=" * 78)
+    print(f"BVAR GDP FORECAST -- target: {tcol}")
+    print("=" * 78)
+
+    Yq = load_quarterly(cfg)
+    print(f"\n[1] Quarterly panel: {Yq.shape[0]} quarters x {Yq.shape[1]} vars, "
+          f"{Yq.index[0].date()} - {Yq.index[-1].date()}")
+    print(Yq.describe().T[["mean", "std", "min", "max"]].round(3))
+
+    # outlier dummies
+    exog_df = None
+    if cfg["outlier_dummies"]:
+        exog_df = pd.DataFrame(0.0, index=Yq.index,
+                               columns=[f"D_{q}" for q in cfg["outlier_dummies"]])
+        for q in cfg["outlier_dummies"]:
+            per = pd.Period(q, freq="Q")
+            hit = Yq.index.to_period("Q") == per
+            exog_df.loc[hit, f"D_{q}"] = 1.0
+        print(f"    outlier dummies: {cfg['outlier_dummies']}")
+
+    # prior means
+    if cfg["prior_mean_delta"] == "auto":
+        deltas = []
+        for c in Yq.columns:
+            tr = (cfg["target_transform"] if c == tcol
+                  else cfg["predictors"][c]["transform"])
+            deltas.append(0.0 if is_growth_like(tr) else 0.9)
+        delta = np.array(deltas)
+    else:
+        delta = np.array([cfg["prior_mean_delta"][c] for c in Yq.columns])
+    print(f"    prior own-lag means delta: "
+          f"{dict(zip(Yq.columns, delta.round(2)))}")
+
+    print("\n[2] Hyperparameter selection (marginal likelihood, GLP 2015)")
+    E = exog_df.values if exog_df is not None else None
+    hyper = select_hyperparams(Yq.values, E, cfg, delta)
+
+    print("\n[3] Recursive out-of-sample backtest "
+          f"(origins from {cfg['oos_start']})")
+    bt = run_backtest(Yq, exog_df, cfg, delta, hyper, rng)
+    summ = backtest_summary(bt, cfg)
+    print(summ)
+    bt.to_csv(os.path.join(cfg["output_dir"], "backtest.csv"), index=False)
+    plot_oos(bt, cfg, os.path.join(cfg["output_dir"], "oos_forecasts.png"))
+
+    print(f"\n[4] Full-sample fit + {cfg['horizon']}-quarter density forecast "
+          f"({cfg['n_draws']} draws)")
+    lam, mu, tau = hyper
+    m = MinnesotaBVAR(cfg["n_lags"], lam, cfg["lag_decay"], mu, tau,
+                      delta).fit(Yq.values, E)
+    p = cfg["n_lags"]
+    rows = [f"{v}.L{1}" for l in range (1, p + 1) for v in Yq.columns]
+    rows += ["const"]+ (list(exog_df.columns) if  exog_df is not None else [])
+    print("---"*50)
+    print(f"\n{tcol} equation coefficients (posterior mean):")
+    print(pd.Series(m.B_post[:, list(Yq.columns).index(tcol)], index=rows).round(3).to_string())
+    print("---"*50)
+    draws = m.sample_forecasts(Yq.values, E, cfg["horizon"],
+                               cfg["n_draws"], rng)
+    j = list(Yq.columns).index(tcol)
+    fdates = pd.period_range(Yq.index[-1], periods=cfg["horizon"] + 1,
+                             freq="Q")[1:]
+    fc = pd.DataFrame({
+        "quarter": fdates.astype(str),
+        "median": np.median(draws[:, :, j], axis=0),
+        "mean": draws[:, :, j].mean(axis=0),
+        "lo68": np.quantile(draws[:, :, j], 0.16, axis=0),
+        "hi68": np.quantile(draws[:, :, j], 0.84, axis=0),
+        "lo90": np.quantile(draws[:, :, j], 0.05, axis=0),
+        "hi90": np.quantile(draws[:, :, j], 0.95, axis=0),
+        "prob_negative": (draws[:, :, j] < 0).mean(axis=0),
+    })
+    print(fc.round(2).to_string(index=False))
+    fc.to_csv(os.path.join(cfg["output_dir"], "forecast.csv"), index=False)
+    plot_fan(Yq, draws, cfg, os.path.join(cfg["output_dir"], "fan_chart.png"))
+
+    raw = pd.read_excel(cfg["excel_path"], sheet_name = cfg["sheet_name"])
+    raw[cfg["date_col"]] = pd.to_datetime(raw[cfg["date_col"]])
+    raw = raw.set_index(cfg["date_col"]).sort_index()
+    raw = raw[raw.index<= pd.Timestamp("2026-06-30")]
+    obs = {}
+    for c, spec in cfg["predictors"].items():
+         q = transform(_q_resample(raw[c].ffill(), spec.get("agg")),
+                  spec["transform"])
+    assert str(q.index[-1].date()) == "2026-06-30", f"{c} stops early"
+    obs[c] = float(q.iloc[-1])
+    print("\nQ2 predictor obersvations:",
+      {k: round(v,3) for k, v in obs.items()})
+    d = nowcast_q(m, Yq, obs, 6000, rng,
+              exog_now=np.zeros(m.n_exog) if m.n_exog else None)
+    print(
+        f"Q2 2026 GDP nowcast: mean {d.mean():.2f}, "
+     f"median {np.median(d):.2f}")
+
+    print(f" 68% [{np.quantile(d, 0.16):.2f}, {np.quantile(d, 0.84):.2f}]"
+      f"90%[{np.quantile(d, 0.05):.2f}, {np.quantile(d,0.95):.2f}]"
+      f"p(neg) {np.mean(d<0):.0%}")
+
+
+
+    with open(os.path.join(cfg["output_dir"], "summary.txt"), "w") as f:
+        f.write("BVAR GDP forecast summary\n" + "=" * 40 + "\n")
+        f.write(f"sample: {Yq.index[0].date()} - {Yq.index[-1].date()} "
+                f"({len(Yq)} quarters)\n")
+        f.write(f"vars: {list(Yq.columns)}\nlags: {cfg['n_lags']}\n")
+        f.write(f"hyperparams: lambda={lam}, soc={mu}, dio={tau}\n\n")
+        f.write("Out-of-sample:\n" + summ + "\n\nForecast:\n")
+        f.write(fc.round(3).to_string(index=False) + "\n")
+    print(f"\nOutputs -> {os.path.abspath(cfg['output_dir'])}/")
+    return bt, fc
+
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--excel", default=None)
+    args = ap.parse_args()
+
+    cfg = dict(CONFIG)
+    if args.excel:
+        cfg["excel_path"] = args.excel
+
+    if args.selftest:
+        print(">> SELF-TEST: synthetic daily dragged panel; PAYROLLS/CAPGOODS "
+              "lead GDP by one quarter; NOISE is useless.\n")
+        panel = make_synthetic_daily()
+        path = "/tmp/bvar_selftest.xlsx"
+        panel.to_excel(path, index=False)
+        cfg.update({
+            "excel_path": path,
+            "output_dir": "bvar_output_selftest",
+            "predictors": {
+                "PAYROLLS": {"transform": "ann_log_growth", "agg": "last"},
+                "CAPGOODS": {"transform": "ann_log_growth", "agg": "last"},
+                "NOISE":    {"transform": "diff",           "agg": "last"},
+            },
+            "target_release_shift_q": 1,
+            "oos_start": "2013-01-01",
+        })
+    elif not os.path.exists(cfg["excel_path"]):
+        sys.exit(f"Excel not found: {cfg['excel_path']} "
+                 "(edit CONFIG, pass --excel, or run --selftest)")
+
+    run(cfg)
+
+
+if __name__ == "__main__":
+    main()
