@@ -1,0 +1,105 @@
+==============================================================================
+BVAR PCE INFLATION FORECAST -- target: PCE DEFM
+==============================================================================
+    WARNING: 3 months inside the sample have missing values and are dropped from estimation
+
+[1] Monthly panel (balanced): 169 months x 9 vars, 2012-03-31 - 2026-06-30
+                                            mean      std      min      max
+PCE DEFM                                 0.00176  0.00218 -0.00500  0.01000
+Core CPI MoM | Model Safe                0.00226  0.00171 -0.00400  0.00900
+CPI Shelter | Model Safe                 0.00304  0.00145 -0.00046  0.00762
+CPI Energy | Model Safe                  0.00137  0.02742 -0.09947  0.10322
+CPI Food | Model Safe                    0.00239  0.00297 -0.00337  0.01529
+PPI Health Services | Model Safe         0.00183  0.00215 -0.00363  0.01071
+Manheim Used Vehicle Index | Model Safe  0.00264  0.02249 -0.12069  0.08820
+WTI Month End | Model Safe              -0.00207  0.12312 -0.78187  0.63327
+PPI Airline Services | Model Safe        0.00158  0.02846 -0.12325  0.11277
+    outlier dummies: ['2020-03', '2020-04', '2020-05', '2020-06']
+    prior own-lag means delta: {'PCE DEFM': np.float64(0.0), 'Core CPI MoM | Model Safe': np.float64(0.0), 'CPI Shelter | Model Safe': np.float64(0.0), 'CPI Energy | Model Safe': np.float64(0.0), 'CPI Food | Model Safe': np.float64(0.0), 'PPI Health Services | Model Safe': np.float64(0.0), 'Manheim Used Vehicle Index | Model Safe': np.float64(0.0), 'WTI Month End | Model Safe': np.float64(0.0), 'PPI Airline Services | Model Safe': np.float64(0.0)}
+
+[2] Hyperparameter selection (marginal likelihood, GLP 2015)
+    selected: lambda=0.3, soc_mu=None, dio_tau=1.0 (log-ML=4960.39)
+
+[3] Recursive out-of-sample backtest (origins from 2018-01-01)
+  h= 1: MAE bvar=0.001402 | AR(12)=0.001516 | AO=0.001602 | mean=0.001779 || RMSE=0.001870 || cov68=72% cov90=84% width68=0.003 || CRPS=0.001014 vs clim 0.001314 | n=87
+        conditional nowcast (given CPI-block): MAE=0.000773 | BRIDGE OLS=0.000735 || cov68=67% width68=0.001643 || CRPS=0.000543
+  h= 3: MAE bvar=0.001748 | AR(12)=0.001807 | AO=0.001685 | mean=0.001790 || RMSE=0.002319 || cov68=60% cov90=79% width68=0.004 || CRPS=0.001304 vs clim 0.001329 | n=87
+  h=12: MAE bvar=0.001989 | AR(12)=0.002237 | AO=0.002133 | mean=0.002025 || RMSE=0.002637 || cov68=61% cov90=76% width68=0.004 || CRPS=0.001504 vs clim 0.001495 | n=87
+
+    by regime:
+  2018-2019 h= 1: MAE=0.001 cov68=88% width68=0.003 n=24
+  2018-2019 h= 3: MAE=0.001 cov68=83% width68=0.003 n=24
+  2018-2019 h=12: MAE=0.002 cov68=62% width68=0.003 n=24
+  2021-2023 h= 1: MAE=0.002 cov68=53% width68=0.003 n=36
+  2021-2023 h= 3: MAE=0.002 cov68=39% width68=0.004 n=36
+  2021-2023 h=12: MAE=0.002 cov68=75% width68=0.004 n=36
+  2024-2026 h= 1: MAE=0.001 cov68=100% width68=0.003 n=15
+  2024-2026 h= 3: MAE=0.001 cov68=87% width68=0.004 n=15
+  2024-2026 h=12: MAE=0.002 cov68=67% width68=0.004 n=15
+
+[4] Full-sample fit + 12-month density forecast (1000 draws)
+------------------------------------------------------------------------------
+PCE DEFM equation coefficients (posterior mean, first 2 lags):
+PCE DEFM.L1                                  -0.03572
+Core CPI MoM | Model Safe.L1                  0.29962
+CPI Shelter | Model Safe.L1                   0.16648
+CPI Energy | Model Safe.L1                    0.00542
+CPI Food | Model Safe.L1                      0.12921
+PPI Health Services | Model Safe.L1          -0.04234
+Manheim Used Vehicle Index | Model Safe.L1    0.01542
+WTI Month End | Model Safe.L1                 0.00741
+PPI Airline Services | Model Safe.L1         -0.00188
+PCE DEFM.L2                                  -0.03221
+Core CPI MoM | Model Safe.L2                  0.01250
+CPI Shelter | Model Safe.L2                  -0.00540
+CPI Energy | Model Safe.L2                   -0.00147
+CPI Food | Model Safe.L2                      0.01174
+PPI Health Services | Model Safe.L2           0.04965
+Manheim Used Vehicle Index | Model Safe.L2   -0.00079
+WTI Month End | Model Safe.L2                 0.00105
+PPI Airline Services | Model Safe.L2          0.00140
+------------------------------------------------------------------------------
+
+[5] NOWCAST -- no ragged edge detected; next-month forecast is unconditional
+
+    Next-print nowcast for PCE DEFM (level units):
+  month     mean   median     lo68    hi68     lo90    hi90  uncond_mean  sd_ratio_cond/uncond  P(>2.0)  P(>3.0)  P(<0)
+2026-07 -0.00127 -0.00135 -0.00287 0.00026 -0.00371 0.00156     -0.00127                   1.0      0.0      0.0  0.797
+
+    12-month path (conditional on released data):
+  month   median     mean     lo68    hi68     lo90    hi90  prob_above_2  prob_negative
+2026-07 -0.00135 -0.00127 -0.00287 0.00026 -0.00371 0.00156           0.0          0.797
+2026-08  0.00105  0.00097 -0.00108 0.00307 -0.00250 0.00430           0.0          0.329
+2026-09  0.00143  0.00141 -0.00056 0.00337 -0.00206 0.00480           0.0          0.243
+2026-10  0.00124  0.00115 -0.00096 0.00320 -0.00231 0.00460           0.0          0.289
+2026-11  0.00129  0.00131 -0.00074 0.00337 -0.00219 0.00461           0.0          0.259
+2026-12  0.00147  0.00148 -0.00060 0.00361 -0.00205 0.00473           0.0          0.232
+2027-01  0.00147  0.00146 -0.00069 0.00356 -0.00202 0.00493           0.0          0.252
+2027-02  0.00148  0.00145 -0.00086 0.00367 -0.00227 0.00514           0.0          0.269
+2027-03  0.00170  0.00160 -0.00054 0.00362 -0.00196 0.00522           0.0          0.236
+2027-04  0.00149  0.00149 -0.00052 0.00355 -0.00199 0.00490           0.0          0.235
+2027-05  0.00164  0.00160 -0.00056 0.00381 -0.00213 0.00512           0.0          0.235
+2027-06  0.00164  0.00166 -0.00039 0.00377 -0.00188 0.00508           0.0          0.212
+
+    12m cumulative PCE DEFM: mean 0.014, median 0.015, 68% [0.001, 0.028], 90% [-0.009, 0.036]
+----------------------------------------------------------------------------------------------------
+    WTI Month End | Model Safe = 20.00% | log change = 0.1823 equivalent shock = +2.05 SD
+
+[6] Scenario -- change WTI Month End | Model Safe in month 1
+----------------------------------------------------------------------------------------------------
+  month  baseline_mean  shocked_mean  delta_mean  delta_lo68  delta_hi68  P(delta<0)
+2026-07       -0.00125      -0.00007     0.00119     0.00096     0.00142       0.000
+2026-08        0.00111       0.00283     0.00172     0.00145     0.00197       0.000
+2026-09        0.00149       0.00219     0.00070     0.00045     0.00095       0.000
+2026-10        0.00138       0.00163     0.00024     0.00003     0.00046       0.128
+2026-11        0.00127       0.00151     0.00023     0.00005     0.00041       0.087
+2026-12        0.00149       0.00174     0.00025     0.00010     0.00039       0.026
+2027-01        0.00152       0.00173     0.00021     0.00009     0.00033       0.036
+2027-02        0.00151       0.00168     0.00017     0.00006     0.00027       0.042
+2027-03        0.00167       0.00183     0.00015     0.00006     0.00025       0.025
+2027-04        0.00159       0.00172     0.00013     0.00005     0.00022       0.031
+2027-05        0.00154       0.00165     0.00011     0.00003     0.00019       0.041
+2027-06        0.00152       0.00162     0.00010     0.00003     0.00016       0.049
+    baseline vs conditional forecast: max |diff|=0.00023 (MC tol ~0.00028) -> OK
+
+Outputs -> C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\BVAR PCE Output/
