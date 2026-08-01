@@ -1,0 +1,1089 @@
+"""
+
+Citations:
+  * Minnesota prior via dummy observations:
+        Litterman (1986); Doan, Litterman & Sims (1984);
+        Banbura, Giannone & Reichlin (2010, JAE) -- "large BVAR" construction.
+    Own-lag prior mean delta_i (0 for growth-rate/differenced series, which
+    is the standard setting for inflation rates; ~0.9 for persistent levels),
+    overall tightness lambda, harmonic lag decay l^d, scales sigma_i from
+    univariate AR residual std devs.
+  * Sum-of-coefficients and dummy-initial-observation priors:
+        Doan et al. (1984); Sims (1993); Sims & Zha (1998).
+  * Hyperparameters chosen by maximizing the closed-form marginal likelihood
+    of the conjugate Normal-Inverse-Wishart model:
+        Giannone, Lenza & Primiceri (2015, REStat).
+  * Conjugate NIW posterior -> exact Monte Carlo (no MCMC):
+        Sigma ~ IW, B|Sigma ~ Matrix-Normal; density forecasts carry both
+        parameter and shock uncertainty (Karlsson 2013, Handbook ch. 15).
+  * COVID outliers via observation dummies with a loose prior, in the spirit
+    of Lenza & Primiceri (2022, JAE).
+  * NOWCAST = exact conditional forecasting ("hard conditions") a la
+        Waggoner & Zha (1999, REStat), with parameter uncertainty:
+    for every posterior draw (B, Sigma) the stacked h-step-ahead predictive
+    distribution is Gaussian, so we condition analytically on every value
+    already released at the ragged edge (CPI first!) and simulate the
+    remaining elements -- this is the standard research setup for
+    CPI-conditioned PCE nowcasts (cf. Knotek & Zaman 2017, JMCB, "Nowcasting
+    U.S. headline and core inflation").
+  * Out-of-sample: recursive pseudo-real-time backtest vs AR(p), the
+    Atkeson & Ohanian (2001) random-walk benchmark, and the historical mean;
+    the CONDITIONAL nowcast itself is backtested (each origin conditions on
+    that month's CPI-block exactly as it would in real time), so you can see
+    how much the CPI print buys you at h=1. RMSE ratios + interval coverage.
+    (On inflation forecast evaluation generally: Faust & Wright 2013,
+    Handbook of Economic Forecasting; Stock & Watson 2007, JMCB.)
+
+
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import warnings
+
+import numpy as np
+import pandas as pd
+from numpy.linalg import slogdet, cholesky
+from scipy.special import multigammaln
+from scipy import stats
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore")
+
+
+#config
+
+CONFIG = {
+    # ---- Data -----------------------------------------------------------------
+    "excel_path": r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\Alignment Output\pce_predictors_aligned.xlsx",
+    "sheet_name": "Aligned Data",
+    "date_col": "Observation Month",
+    "data_frequency": "monthly",      # "monthly", "daily_asknown" , "auto"
+    "sample_end": None,               # e.g. "2026-06-30" to truncate none = whole given sample
+
+
+    # Target
+    "target_col": "PCE DEFM",
+    "target_transform": "level",
+    # 0 for an aligned monthly panel -------- Only for dragged panels.
+    "target_release_shift_m": 0,
+
+
+    "scenario": {
+        "enabled" : True,
+        "variable": "WTI Month End | Model Safe",
+        "percent_change": 25, #+20 increase, -20% decrease
+        "shock_month": None, #none is the first month after the ragged edge
+        "order" : [ #need this cholesky ordering --- shock variable goes first (rest of order is arbitrary)
+            "WTI Month End | Model Safe",
+            "CPI Energy | Model Safe",
+            "CPI Food | Model Safe",
+            "Manheim Used Vehicle Index | Model Safe",
+            "Core CPI MoM | Model Safe",
+            "CPI Shelter | Model Safe",
+            "PPI Health Services | Model Safe",
+            "PPI Airline Services | Model Safe",
+            "PCE DEFM",
+
+
+
+
+        ],
+
+    },
+
+
+
+
+    # transforms: level, diff, log_diff, ann_log_growth (1200*dlog),
+    #             yoy_log_diff (100*dlog12), pct_change
+    # "agg" only matters for a daily as known input
+
+    "predictors": {
+        "Core CPI MoM | Model Safe":            {"transform": "level", "agg": "last"},
+        "CPI Shelter | Model Safe":            {"transform": "log_diff", "agg": "last"},
+        "CPI Energy | Model Safe":    {"transform": "log_diff", "agg": "last"},
+        "CPI Food | Model Safe":                 {"transform": "log_diff",       "agg": "last"},
+        "PPI Health Services | Model Safe":        {"transform": "log_diff",          "agg": "last"},
+        "Manheim Used Vehicle Index | Model Safe": {"transform": "log_diff",       "agg": "last"},
+        "WTI Month End | Model Safe": {"transform": "log_diff", "agg": "last"},
+        "PPI Airline Services | Model Safe": {"transform": "log_diff",       "agg": "last"}
+    },
+
+    # ---- Model ----------------------------------------------------------------
+    "n_lags": 12,                  
+    "prior_mean_delta": "auto",       # 0 for growth-like, 0.9 for levels
+    "lag_decay": 2.0,                 # harmonic decay exponent d (l^d)
+
+    # Hyperparameters by marginal likelihood
+    "lambda_grid": [0.05, 0.1, 0.2, 0.3, 0.5, 1.0],
+    "soc_grid":    [0.5, 1.0, 5.0, None],   # sum-of-coefficients mu (None=off)
+    "dio_grid":    [1.0, None],             # dummy-initial-observation tau
+
+    # COVID / outlier months 
+    "outlier_dummies": ["2020-03", "2020-04", "2020-05", "2020-06"],
+
+    # ---- Nowcast --------------------------------------------------------------
+    # Values you know but that are not yet in the Excel file, in TRANSFORMED
+    # units (e.g. m/m annualized % if the transform is ann_log_growth):
+    #   {"2026-06": {"CPI": 3.1, "Core CPI": 2.9}}
+    "manual_conditions": {},
+    "max_ragged_months": 3,           # safety cap on the ragged edge
+    "nowcast_thresholds": [2.0, 3.0], # report P(next print > x) in target units
+
+    # ---- Forecasting ----------------------------------------------------------
+    "horizon": 12,                    # months ahead (fan chart)
+    "n_draws": 1000,                  # posterior/predictive draws
+    "bands": [0.68, 0.90],
+
+    # ---- Out-of-sample backtest -----------------------------------------------
+    "oos_start": "2016-01-01",        # first forecast origin
+    "oos_horizons": [1, 3, 12],       # months ahead to test
+    "oos_step": 1,                    # use every k-th month as an origin
+    "oos_draws": 300,
+    "nowcast_condition_cols": ["Core CPI MoM | Model Safe", "CPI Shelter | Model Safe", "CPI Energy | Model Safe", "CPI Food | Model Safe", "PPI Health Services | Model Safe", "PPI Airline Services | Model Safe", "Manheim Used Vehicle Index | Model Safe", "WTI Month End | Model Safe"],
+    "reoptimize_each_step": True,
+    "hyper_reopt_every": 12,          #currently three might need to use 12
+
+    "seed": 42,
+    "output_dir": r"C:\Users\oaksla\OneDrive - Federated Hermes, Inc\Desktop\BVAR PCE Output",
+}
+
+
+
+# Data handling
+
+
+def _m_resample(s: pd.Series, how: str) -> pd.Series:
+    try:
+        r = s.resample("ME")
+    except ValueError:                       # older pandas
+        r = s.resample("M")
+    return r.mean() if how == "mean" else r.last()
+
+
+def transform(s: pd.Series, method: str) -> pd.Series:
+    m = method.lower()
+    if m == "level":
+        return s
+    if m == "diff":
+        return s.diff()
+    if m == "log_diff":
+        return np.log(s).diff()
+    if m == "ann_log_growth":                # m/m annualized as a percent
+        return 1200.0 * np.log(s).diff()
+    if m == "yoy_log_diff":
+        return 100.0 * np.log(s).diff(12)
+    if m == "pct_change":
+        return 100.0 * s.pct_change()
+    raise ValueError(f"unknown transform {method}")
+
+
+def is_growth_like(method: str) -> bool:
+    return method.lower() in ("diff", "log_diff", "ann_log_growth",
+                              "yoy_log_diff", "pct_change")
+
+
+def _detect_frequency(idx: pd.DatetimeIndex) -> str:
+    if len(idx) < 3:
+        return "monthly"
+    med = np.median(np.diff(idx.values).astype("timedelta64[D]").astype(int))
+    return "daily_asknown" if med <= 7 else "monthly"
+
+
+def load_monthly(cfg):
+    df = pd.read_excel(cfg["excel_path"], sheet_name=cfg["sheet_name"])
+    df[cfg["date_col"]] = pd.to_datetime(df[cfg["date_col"]])
+    df = df.set_index(cfg["date_col"]).sort_index()
+    if cfg.get("sample_end"):
+        df = df[df.index <= pd.Timestamp(cfg["sample_end"])]
+
+    cols = [cfg["target_col"]] + list(cfg["predictors"].keys())
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"columns not found: {missing}; "
+                       f"available: {list(df.columns)}")
+
+    freq = cfg.get("data_frequency", "auto")
+    if freq == "auto":
+        freq = _detect_frequency(df.index)
+        print(f"    data_frequency=auto -> detected '{freq}'")
+    daily = freq == "daily_asknown"
+
+    out = {}
+    # target -- NOTE: no ffill for aligned monthly data, so the missing latest
+    # PCE stays NaN and is picked up as the nowcast month.
+    t_raw = df[cfg["target_col"]].ffill() if daily else df[cfg["target_col"]]
+    tm = _m_resample(t_raw, "last")
+    shift = int(cfg.get("target_release_shift_m", 0))
+    if shift:
+        tm = tm.shift(-shift)
+    out[cfg["target_col"]] = transform(tm, cfg["target_transform"])
+
+    for c, spec in cfg["predictors"].items():
+        raw = df[c].ffill() if daily else df[c]
+        q = _m_resample(raw, spec.get("agg", "last") if daily else "last")
+        out[c] = transform(q, spec["transform"])
+
+    P = pd.DataFrame(out)
+    P = P.loc[P.notna().any(axis=1)]
+    Ybal = P.dropna()
+    if len(Ybal) == 0:
+        raise ValueError("no balanced observations after transforms")
+    # warn about interior gaps (holes strictly inside the balanced span)
+    inner = P.loc[Ybal.index[0]:Ybal.index[-1]]
+    n_holes = int(inner.isna().any(axis=1).sum())
+    if n_holes:
+        print(f"    WARNING: {n_holes} months inside the sample have missing "
+              f"values and are dropped from estimation")
+    Ybal = inner.dropna()
+    ragged = P.loc[P.index > Ybal.index[-1]]
+    if len(ragged) > cfg["max_ragged_months"]:
+        print(f"    WARNING: ragged edge is {len(ragged)} months; keeping the "
+              f"first {cfg['max_ragged_months']} (check your data)")
+        ragged = ragged.iloc[:cfg["max_ragged_months"]]
+    return P, Ybal, ragged
+
+
+#minnesota prior dummy dummy
+
+def ar_resid_sigmas(Y: np.ndarray, p: int) -> np.ndarray:
+    T, n = Y.shape
+    sig = np.empty(n)
+    for i in range(n):
+        y = Y[:, i]
+        X = np.column_stack([y[p - l - 1:T - l - 1] for l in range(p)]
+                            + [np.ones(T - p)])
+        yy = y[p:]
+        beta, *_ = np.linalg.lstsq(X, yy, rcond=None)
+        r = yy - X @ beta
+        sig[i] = max(np.std(r, ddof=min(X.shape[1], len(yy) - 1)), 1e-8)
+    return sig
+
+
+def build_dummies(n, p, sig, delta, lam, decay, soc_mu, dio_tau, ybar,
+                  n_exog):
+    """
+    Dummy observations encoding the priors. Regressor ordering:
+    [lag1 vars ... lagp vars, intercept, exog dummies].
+    """
+    k = n * p + 1 + n_exog
+    rows_Y, rows_X = [], []
+
+    # (1) Minnesota prior on lag coefficients
+    for l in range(1, p + 1):
+        Yd = np.zeros((n, n))
+        Xd = np.zeros((n, k))
+        for i in range(n):
+            scale = sig[i] * (l ** decay) / lam
+            if l == 1:
+                Yd[i, i] = delta[i] * scale
+            Xd[i, (l - 1) * n + i] = scale
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+
+    rows_Y.append(np.diag(sig)); rows_X.append(np.zeros((n, k)))
+
+
+    eps = 1e-4
+    for j in range(1 + n_exog):
+        Yd = np.zeros((1, n)); Xd = np.zeros((1, k))
+        Xd[0, n * p + j] = eps
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    #sum-of-coefficients prior (Doan/Sims)
+    if soc_mu is not None:
+        Yd = np.diag(delta * ybar) / soc_mu
+        Xd = np.zeros((n, k))
+        for l in range(p):
+            Xd[:, l * n:(l + 1) * n] = np.diag(delta * ybar) / soc_mu
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    if dio_tau is not None:
+        Yd = (ybar / dio_tau).reshape(1, n)
+        Xd = np.zeros((1, k))
+        for l in range(p):
+            Xd[0, l * n:(l + 1) * n] = ybar / dio_tau
+        Xd[0, n * p] = 1.0 / dio_tau
+        rows_Y.append(Yd); rows_X.append(Xd)
+
+    return np.vstack(rows_Y), np.vstack(rows_X)
+
+
+def design_matrices(Y: np.ndarray, p: int, exog):
+    T, n = Y.shape
+    X = np.column_stack([Y[p - l - 1:T - l - 1, :] for l in range(p)]
+                        + [np.ones((T - p, 1))])
+    if exog is not None:
+        X = np.column_stack([X, exog[p:]])
+    return Y[p:], X
+
+
+
+
+
+def _ma_matrices(A, n, p, Hmax):
+    Psi = [np.eye(n)]
+    for h in range(1, Hmax +1):
+        acc = np.zeros((n, n))
+        for l in range(1, min(h,p)+1):
+            acc +=A[l -1] @ Psi[h-1]
+        Psi.append(acc)
+    return Psi
+
+
+
+
+
+
+
+
+
+class MinnesotaBVAR:
+    def __init__(self, p, lam, decay, soc_mu, dio_tau, delta):
+        self.p, self.lam, self.decay = p, lam, decay
+        self.soc_mu, self.dio_tau, self.delta = soc_mu, dio_tau, delta
+
+    #fit
+    def fit(self, Y: np.ndarray, exog: np.ndarray | None = None):
+        p = self.p
+        T, n = Y.shape
+        self.n = n
+        self.n_exog = 0 if exog is None else exog.shape[1]
+        sig = ar_resid_sigmas(Y, p)
+        ybar = Y[:p].mean(axis=0)
+        Yd, Xd = build_dummies(n, p, sig, self.delta, self.lam, self.decay,
+                               self.soc_mu, self.dio_tau, ybar, self.n_exog)
+        Yt, Xt = design_matrices(Y, p, exog)
+        Ys, Xs = np.vstack([Yt, Yd]), np.vstack([Xt, Xd])
+
+        XtX = Xs.T @ Xs
+        self.XtX_inv = np.linalg.inv(XtX + 1e-10 * np.eye(XtX.shape[0]))
+        self.B_post = self.XtX_inv @ Xs.T @ Ys
+        R = Ys - Xs @ self.B_post
+        self.S_post = R.T @ R
+        self.dof = Yt.shape[0] + Yd.shape[0] - Xs.shape[1]
+        self._ml_pieces = (Yd, Xd, Yt, Xt)
+        self.k = Xs.shape[1]
+        return self
+
+
+    def log_ml(self) -> float:
+        Yd, Xd, Yt, Xt = self._ml_pieces
+        n = self.n; k = self.k
+        Td, T = Yd.shape[0], Yt.shape[0]
+
+        def niw_pieces(Ya, Xa):
+            XtX = Xa.T @ Xa + 1e-10 * np.eye(k)
+            B = np.linalg.solve(XtX, Xa.T @ Ya)
+            R = Ya - Xa @ B
+            S = R.T @ R + 1e-10 * np.eye(n)
+            return slogdet(XtX)[1], slogdet(S)[1]
+
+        ld_X0, ld_S0 = niw_pieces(Yd, Xd)
+        ld_X1, ld_S1 = niw_pieces(np.vstack([Yt, Yd]), np.vstack([Xt, Xd]))
+        a0 = Td - k
+        a1 = Td + T - k
+        if a0 <= n or a1 <= n:
+            return -np.inf
+        lml = (-0.5 * n * T * np.log(np.pi)
+               + multigammaln(a1 / 2, n) - multigammaln(a0 / 2, n)
+               + 0.5 * n * (ld_X0 - ld_X1)
+               + 0.5 * (a0 * ld_S0 - a1 * ld_S1))
+        return float(lml)
+
+
+    def _draw_params(self, rng):
+        n = self.n
+        Sigma = stats.invwishart.rvs(df=max(self.dof, n + 2),
+                                     scale=self.S_post, random_state=rng)
+        Sigma = np.atleast_2d(Sigma)
+        cS = cholesky(Sigma + 1e-12 * np.eye(n))
+        if not hasattr(self, "_cholX"):
+            self._cholX = cholesky(self.XtX_inv + 1e-12 * np.eye(self.k))
+        B = self.B_post + self._cholX @ rng.standard_normal((self.k, n)) @ cS.T
+        return B, Sigma, cS
+
+    # conditional predictive simulation -
+    def conditional_paths(self, Y, H, conditions, n_draws, rng,
+                          exog_future=None) -> np.ndarray:
+        """
+        hard conditions (Waggoner-Zha 1999)
+        under parameter uncertainty. For each posterior draw (B, Sigma) the
+        stacked future vector is Gaussian:
+            mean  = deterministic iteration of the VAR,
+            Cov(y_{T+i}, y_{T+j}) = sum_{s=1..min(i,j)} Psi_{i-s} Sigma Psi_{j-s}'
+        with Psi the MA(inf) matrices. It conditions analytically on every
+        released value  and simulate the rest.
+        """
+        p, n = self.p, self.n
+        obs_ix = sorted(conditions.keys())
+        obs_v = np.array([conditions[i] for i in obs_ix], dtype=float)
+        un_ix = [i for i in range(H * n) if i not in set(obs_ix)]
+        out = np.empty((n_draws, H, n))
+        hist = Y[-p:].copy()
+
+        for d in range(n_draws):
+            B, Sigma, _ = self._draw_params(rng)
+            A = [B[l * n:(l + 1) * n, :].T for l in range(p)]   # A_1..A_p
+
+            # deterministic mean path
+            lags = hist.copy()
+            M = np.empty((H, n))
+            for h in range(H):
+                x = np.concatenate([lags[-l - 1] for l in range(p)] + [[1.0]])
+                if self.n_exog:
+                    xf = (exog_future[h] if exog_future is not None
+                          else np.zeros(self.n_exog))
+                    x = np.concatenate([x, xf])
+                M[h] = x @ B
+                lags = np.vstack([lags, M[h]])
+
+            # MA matrices Psi_0..Psi_{H-1}
+            Psi = [np.eye(n)]
+            for h in range(1, H):
+                acc = np.zeros((n, n))
+                for l in range(1, min(h, p) + 1):
+                    acc += A[l - 1] @ Psi[h - l]
+                Psi.append(acc)
+
+            # stacked covariance
+            C = np.zeros((H * n, H * n))
+            for i in range(1, H + 1):
+                for j in range(i, H + 1):
+                    blk = np.zeros((n, n))
+                    for s in range(1, i + 1):
+                        blk += Psi[i - s] @ Sigma @ Psi[j - s].T
+                    C[(i - 1) * n:i * n, (j - 1) * n:j * n] = blk
+                    if i != j:
+                        C[(j - 1) * n:j * n, (i - 1) * n:i * n] = blk.T
+            mvec = M.reshape(-1)
+
+            path = np.empty(H * n)
+            if obs_ix:
+                Coo = C[np.ix_(obs_ix, obs_ix)] + 1e-10 * np.eye(len(obs_ix))
+                Cuo = C[np.ix_(un_ix, obs_ix)]
+                Cuu = C[np.ix_(un_ix, un_ix)]
+                sol = np.linalg.solve(Coo, obs_v - mvec[obs_ix])
+                mu_c = mvec[un_ix] + Cuo @ sol
+                Cov_c = Cuu - Cuo @ np.linalg.solve(Coo, Cuo.T)
+                Cov_c = 0.5 * (Cov_c + Cov_c.T)
+                L = cholesky(Cov_c + 1e-8 * np.eye(len(un_ix)))
+                path[obs_ix] = obs_v
+                path[un_ix] = mu_c + L @ rng.standard_normal(len(un_ix))
+            else:
+                L = cholesky(C + 1e-8 * np.eye(H * n))
+                path = mvec + L @ rng.standard_normal(H * n)
+            out[d] = path.reshape(H, n)
+        return out
+
+    def sample_forecasts(self, Y, H, n_draws, rng, exog_future=None):
+        """Unconditional predictive draws (special case: no conditions)."""
+        return self.conditional_paths(Y, H, {}, n_draws, rng, exog_future)
+    def scenario_forecasts(self, Y, H, shock_j, size_sd, shock_month,
+                           n_draws, rng, order=None, conditions=None,
+                           exog_future=None):
+        """Baseline vs shocked paths under a Cholesky-identified shock.
+        Returns (base, shocked, deltas), each (n_draws, H, n)."""
+        p, n = self.p, self.n
+        conditions = conditions or {}
+        perm = list(range(n)) if order is None else list(order)
+        k_pos = perm.index(shock_j)
+        t0 = shock_month - 1
+        obs_ix = sorted(conditions.keys())
+        obs_v = np.array([conditions[i] for i in obs_ix], dtype=float)
+        un_ix = [i for i in range(H * n) if i not in set(obs_ix)]
+        base = np.empty((n_draws, H, n))
+        deltas = np.empty((n_draws, H, n))
+        hist = Y[-p:].copy()
+
+        for d in range(n_draws):
+            B, Sigma, _ = self._draw_params(rng)
+            A = [B[l * n:(l + 1) * n, :].T for l in range(p)]
+
+            # --- baseline path: identical to the body of conditional_paths ---
+            lags = hist.copy()
+            M = np.empty((H, n))
+            for h in range(H):
+                x = np.concatenate([lags[-l - 1] for l in range(p)] + [[1.0]])
+                if self.n_exog:
+                    xf = (exog_future[h] if exog_future is not None
+                          else np.zeros(self.n_exog))
+                    x = np.concatenate([x, xf])
+                M[h] = x @ B
+                lags = np.vstack([lags, M[h]])
+            Psi = _ma_matrices(A, n, p, H - 1)
+            C = np.zeros((H * n, H * n))
+            for i in range(1, H + 1):
+                for j in range(i, H + 1):
+                    blk = np.zeros((n, n))
+                    for s in range(1, i + 1):
+                        blk += Psi[i - s] @ Sigma @ Psi[j - s].T
+                    C[(i - 1) * n:i * n, (j - 1) * n:j * n] = blk
+                    if i != j:
+                        C[(j - 1) * n:j * n, (i - 1) * n:i * n] = blk.T
+            mvec = M.reshape(-1)
+            path = np.empty(H * n)
+            if obs_ix:
+                Coo = C[np.ix_(obs_ix, obs_ix)] + 1e-10 * np.eye(len(obs_ix))
+                Cuo = C[np.ix_(un_ix, obs_ix)]
+                Cuu = C[np.ix_(un_ix, un_ix)]
+                sol = np.linalg.solve(Coo, obs_v - mvec[obs_ix])
+                mu_c = mvec[un_ix] + Cuo @ sol
+                Cov_c = Cuu - Cuo @ np.linalg.solve(Coo, Cuo.T)
+                Cov_c = 0.5 * (Cov_c + Cov_c.T)
+                L = cholesky(Cov_c + 1e-8 * np.eye(len(un_ix)))
+                path[obs_ix] = obs_v
+                path[un_ix] = mu_c + L @ rng.standard_normal(len(un_ix))
+            else:
+                L = cholesky(C + 1e-8 * np.eye(H * n))
+                path = mvec + L @ rng.standard_normal(H * n)
+            base[d] = path.reshape(H, n)
+
+            # --- NEW: structural impact + impulse deltas ---
+            Sp = Sigma[np.ix_(perm, perm)]
+            Pp = cholesky(Sp + 1e-12 * np.eye(n))
+            impact = np.zeros(n)
+            for i in range(n):
+                impact[perm[i]] = Pp[i, k_pos]
+            impact *= size_sd
+            dl = np.zeros((H, n))
+            for h in range(t0, H):
+                dl[h] = Psi[h - t0] @ impact
+            deltas[d] = dl
+
+        return base, base + deltas, deltas
+
+
+# Hyperparameter search GLP 2015 
+
+def select_hyperparams(Y, exog, cfg, delta, verbose=True):
+    best = (-np.inf, None)
+    for lam in cfg["lambda_grid"]:
+        for mu in cfg["soc_grid"]:
+            for tau in cfg["dio_grid"]:
+                m = MinnesotaBVAR(cfg["n_lags"], lam, cfg["lag_decay"],
+                                  mu, tau, delta).fit(Y, exog)
+                lml = m.log_ml()
+                if lml > best[0]:
+                    best = (lml, (lam, mu, tau))
+    lam, mu, tau = best[1]
+    if verbose:
+        print(f"    selected: lambda={lam}, soc_mu={mu}, dio_tau={tau} "
+              f"(log-ML={best[0]:.2f})")
+    return lam, mu, tau
+
+
+
+# Benchmark
+
+def ar_benchmark_forecast(y: np.ndarray, p: int, h: int) -> float:
+    """Iterated AR(p) OLS forecast h steps ahead."""
+    T = len(y)
+    X = np.column_stack([y[p - l - 1:T - l - 1] for l in range(p)]
+                        + [np.ones(T - p)])
+    beta, *_ = np.linalg.lstsq(X, y[p:], rcond=None)
+    hist = list(y[-p:])
+    for _ in range(h):
+        x = np.array(hist[::-1][:p] + [1.0])
+        hist.append(float(x @ beta))
+    return hist[-1]
+
+
+def ao_benchmark(y: np.ndarray) -> float:
+    """Atkeson-Ohanian (2001): forecast = mean of the last 12 monthly obs."""
+    return float(np.mean(y[-12:]))
+
+
+# Recursive out-of-sample backtest (incl. pseudo-real-time CPI-conditioning)
+
+
+def run_backtest(Yq: pd.DataFrame, exog_df, cfg, delta, hyper, rng):
+    tcol = cfg["target_col"]
+    cols = list(Yq.columns)
+    tgt_j = cols.index(tcol)
+    cond_cols = [c for c in cfg.get("nowcast_condition_cols", [])
+                 if c in cols and c != tcol]
+    cond_js = [cols.index(c) for c in cond_cols]
+
+    lam, mu, tau = hyper
+    origins = Yq.index[Yq.index >= pd.Timestamp(cfg["oos_start"])]
+    origins = origins[::max(int(cfg.get("oos_step", 1)), 1)]
+    Hmax = max(cfg["oos_horizons"])
+    rows = []
+    for step, t0 in enumerate(origins):
+        i0 = Yq.index.get_loc(t0)
+        if i0 + Hmax >= len(Yq):
+            break
+        Ytr = Yq.iloc[:i0 + 1]
+        Etr = exog_df.iloc[:i0 + 1].values if exog_df is not None else None
+        if (cfg["reoptimize_each_step"]
+                and step % max(int(cfg.get("hyper_reopt_every", 1)), 1) == 0):
+            lam, mu, tau = select_hyperparams(Ytr.values, Etr, cfg, delta,
+                                              verbose=False)
+        m = MinnesotaBVAR(cfg["n_lags"], lam, cfg["lag_decay"],
+                          mu, tau, delta).fit(Ytr.values, Etr)
+
+        nd = int(cfg.get("oos_draws", 2000))
+        draws = m.sample_forecasts(Ytr.values, Hmax, nd, rng)
+
+        # pseudo-real-time conditional nowcast: month t0+1, conditioning on
+        # the (already published in real life) CPI-block values of that month
+        cond = {0 * len(cols) + j: float(Yq.iloc[i0 + 1, j]) for j in cond_js}
+        cdraws = m.conditional_paths(Ytr.values, 1, cond, nd, rng)
+        cfc = cdraws[:, 0, tgt_j]
+
+        for h in cfg["oos_horizons"]:
+            fc = draws[:, h - 1, tgt_j]
+            rec = {
+                "origin": t0, "h": h,
+                "actual": Yq[tcol].iloc[i0 + h],
+                "bvar_mean": fc.mean(),
+                "bvar_lo68": np.quantile(fc, 0.16),
+                "bvar_hi68": np.quantile(fc, 0.84),
+                "ar_bench": ar_benchmark_forecast(Ytr[tcol].values,
+                                                  cfg["n_lags"], h),
+                "ao": ao_benchmark(Ytr[tcol].values),
+                "hist_mean": Ytr[tcol].mean(),
+            }
+            if h == 1:
+                rec.update({
+                    "bvar_cond_mean": cfc.mean(),
+                    "bvar_cond_lo68": np.quantile(cfc, 0.16),
+                    "bvar_cond_hi68": np.quantile(cfc, 0.84),
+                })
+            rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def backtest_summary(bt: pd.DataFrame, cfg) -> str:
+    lines = []
+    for h in cfg["oos_horizons"]:
+        b = bt[bt["h"] == h]
+        if len(b) == 0:
+            continue
+        rmse = lambda c: np.sqrt(np.mean((b["actual"] - b[c]) ** 2))
+        r_b, r_ar, r_ao, r_mn = (rmse("bvar_mean"), rmse("ar_bench"),
+                                 rmse("ao"), rmse("hist_mean"))
+        cov = np.mean((b["actual"] >= b["bvar_lo68"])
+                      & (b["actual"] <= b["bvar_hi68"]))
+        line = (f"  h={h:>2}: BVAR RMSE={r_b:.6f} | AR({cfg['n_lags']})="
+                f"{r_ar:.6f} (ratio {r_b / r_ar:.6f}) | AO={r_ao:.6f} "
+                f"(ratio {r_b / r_ao:.6f}) | mean={r_mn:.6f} "
+                f"| 68% cov={cov:.0%} | n={len(b)}")
+        if h == 1 and "bvar_cond_mean" in b.columns:
+            r_c = rmse("bvar_cond_mean")
+            ccov = np.mean((b["actual"] >= b["bvar_cond_lo68"])
+                           & (b["actual"] <= b["bvar_cond_hi68"]))
+            line += (f"\n        conditional nowcast (given released values): "
+                     f"RMSE={r_c:.6f} (vs uncond {r_b:.6f}, ratio "
+                     f"{r_c / r_b:.6f}) | 68% cov={ccov:.0%}")
+        lines.append(line)
+    return "\n".join(lines)
+
+
+
+# Plots
+
+
+plt.rcParams.update({
+    "figure.dpi": 130, "font.size": 9.5, "axes.grid": True,
+    "grid.alpha": 0.3, "axes.spines.top": False, "axes.spines.right": False,
+})
+
+
+def plot_fan(Yq, draws, fdates, cfg, path, n_cond):
+    tcol = cfg["target_col"]
+    j = list(Yq.columns).index(tcol)
+    hist = Yq[tcol].iloc[-48:]
+    fc = draws[:, :, j]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(hist.index, hist.values, color="#1f4e79", lw=1.6, label="actual")
+    ax.plot(fdates, np.median(fc, axis=0), color="#c0392b", lw=1.8,
+            label="BVAR median")
+    for band, alp in zip(sorted(cfg["bands"]), [0.30, 0.15]):
+        lo = np.quantile(fc, (1 - band) / 2, axis=0)
+        hi = np.quantile(fc, 1 - (1 - band) / 2, axis=0)
+        ax.fill_between(fdates, lo, hi, color="#c0392b", alpha=alp,
+                        label=f"{int(band * 100)}% band")
+    ax.axhline(0, color="k", lw=0.8)
+    ax.axhline(2, color="#7f8c8d", lw=0.8, ls=":")
+    cond_note = (f", conditioned on {n_cond} released value(s)"
+                 if n_cond else "")
+    ax.set_title(f"BVAR density forecast: {tcol} "
+                 f"({cfg['target_transform']}, monthly{cond_note})")
+    ax.set_ylabel("percent")
+    ax.legend(fontsize=8)
+    fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+
+
+def plot_nowcast(cond_d, uncond_d, label, path):
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.hist(uncond_d, bins=60, density=True, alpha=0.35, color="#7f8c8d",
+            label=f"unconditional (sd={uncond_d.std():.2f})")
+    ax.hist(cond_d, bins=60, density=True, alpha=0.55, color="#c0392b",
+            label=f"conditional on released data (sd={cond_d.std():.2f})")
+    ax.axvline(cond_d.mean(), color="#c0392b", lw=1.5)
+    ax.axvline(uncond_d.mean(), color="#7f8c8d", lw=1.2, ls="--")
+    ax.set_title(f"Nowcast density: {label}")
+    ax.set_xlabel("percent"); ax.legend(fontsize=8)
+    fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+
+
+def plot_oos(bt, cfg, path):
+    fig, axes = plt.subplots(len(cfg["oos_horizons"]), 1,
+                             figsize=(10, 3.6 * len(cfg["oos_horizons"])),
+                             sharex=True, squeeze=False)
+    for ax, h in zip(axes[:, 0], cfg["oos_horizons"]):
+        b = bt[bt["h"] == h]
+        ax.plot(b["origin"], b["actual"], color="k", lw=1.3, label="actual")
+        ax.plot(b["origin"], b["bvar_mean"], color="#c0392b", lw=1.3,
+                label="BVAR")
+        ax.fill_between(b["origin"], b["bvar_lo68"], b["bvar_hi68"],
+                        color="#c0392b", alpha=0.18, label="68% band")
+        if h == 1 and "bvar_cond_mean" in b.columns:
+            ax.plot(b["origin"], b["bvar_cond_mean"], color="#1f4e79",
+                    lw=1.2, label="BVAR | CPI-block")
+        ax.plot(b["origin"], b["ar_bench"], color="#7f8c8d", lw=1.0, ls="--",
+                label=f"AR({cfg['n_lags']})")
+        ax.set_title(f"Recursive out-of-sample, h={h}")
+        ax.legend(fontsize=8, ncol=3)
+    fig.tight_layout(); fig.savefig(path, bbox_inches="tight"); plt.close(fig)
+
+
+
+# Main pipeline
+
+def build_conditions(ragged: pd.DataFrame, cols, cfg):
+    """Stacked-index hard conditions from the ragged edge + manual overrides."""
+    n = len(cols)
+    conds, desc = {}, []
+    for h, (dt, row) in enumerate(ragged.iterrows(), start=1):
+        got = []
+        for j, c in enumerate(cols):
+            v = row[c]
+            if pd.notna(v):
+                conds[(h - 1) * n + j] = float(v)
+                got.append(f"{c}={v:.2f}")
+        if got:
+            desc.append(f"{dt:%Y-%m}: " + ", ".join(got))
+    for dstr, dd in cfg.get("manual_conditions", {}).items():
+        per = pd.Period(dstr, freq="M")
+        # h index relative to last balanced month
+        h = None
+        for hh, dt in enumerate(ragged.index, start=1):
+            if dt.to_period("M") == per:
+                h = hh
+        if h is None:
+            h = len(ragged) + (per - ragged.index[-1].to_period("M")).n \
+                if len(ragged) else (per.ordinal + 1)
+            print(f"    NOTE: manual condition month {dstr} beyond ragged "
+                  f"edge -> mapped to h={h}")
+        for c, v in dd.items():
+            if c in cols:
+                conds[(h - 1) * n + cols.index(c)] = float(v)
+                desc.append(f"{dstr} (manual): {c}={v:.2f}")
+    return conds, desc
+
+
+def run(cfg):
+    rng = np.random.default_rng(cfg["seed"])
+    os.makedirs(cfg["output_dir"], exist_ok=True)
+    tcol = cfg["target_col"]
+
+    print("=" * 78)
+    print(f"BVAR PCE INFLATION FORECAST -- target: {tcol}")
+    print("=" * 78)
+
+    P, Yq, ragged = load_monthly(cfg)
+    cols = list(Yq.columns)
+    n = len(cols)
+    tgt_j = cols.index(tcol)
+    print(f"\n[1] Monthly panel (balanced): {Yq.shape[0]} months x {n} vars, "
+          f"{Yq.index[0].date()} - {Yq.index[-1].date()}")
+    print(Yq.describe().T[["mean", "std", "min", "max"]].round(5))
+    if len(ragged):
+        print(f"    ragged edge ({len(ragged)} month(s), {tcol} not yet "
+              f"released):")
+        print(ragged.round(5).to_string())
+
+    # outlier dummies (monthly periods)
+    exog_df = None
+    if cfg["outlier_dummies"]:
+        exog_df = pd.DataFrame(
+            0.0, index=Yq.index,
+            columns=[f"D_{q}" for q in cfg["outlier_dummies"]])
+        for q in cfg["outlier_dummies"]:
+            per = pd.Period(q, freq="M")
+            exog_df.loc[Yq.index.to_period("M") == per, f"D_{q}"] = 1.0
+        print(f"    outlier dummies: {cfg['outlier_dummies']}")
+
+    # prior means
+    if cfg["prior_mean_delta"] == "auto":
+        delta = np.array([
+            0.0 if is_growth_like(cfg["target_transform"] if c == tcol
+                                  else cfg["predictors"][c]["transform"])
+            else 0.9
+            for c in cols])
+    else:
+        delta = np.array([cfg["prior_mean_delta"][c] for c in cols])
+    print(f"    prior own-lag means delta: {dict(zip(cols, delta.round(5)))}")
+
+    print("\n[2] Hyperparameter selection (marginal likelihood, GLP 2015)")
+    E = exog_df.values if exog_df is not None else None
+    hyper = select_hyperparams(Yq.values, E, cfg, delta)
+
+    print(f"\n[3] Recursive out-of-sample backtest "
+          f"(origins from {cfg['oos_start']})")
+    bt = run_backtest(Yq, exog_df, cfg, delta, hyper, rng)
+    summ = backtest_summary(bt, cfg)
+    print(summ)
+    bt.to_csv(os.path.join(cfg["output_dir"], "backtest.csv"), index=False)
+    plot_oos(bt, cfg, os.path.join(cfg["output_dir"], "oos_forecasts.png"))
+
+    # full-sample fit
+    print(f"\n[4] Full-sample fit + {cfg['horizon']}-month density forecast "
+          f"({cfg['n_draws']} draws)")
+    lam, mu, tau = hyper
+    m = MinnesotaBVAR(cfg["n_lags"], lam, cfg["lag_decay"], mu, tau,
+                      delta).fit(Yq.values, E)
+    p = cfg["n_lags"]
+    rows = [f"{v}.L{l}" for l in range(1, p + 1) for v in cols]
+    rows += ["const"] + (list(exog_df.columns) if exog_df is not None else [])
+    print("-" * 78)
+    print(f"{tcol} equation coefficients (posterior mean, first 2 lags):")
+    ser = pd.Series(m.B_post[:, tgt_j], index=rows)
+    print(ser.iloc[:2 * n].round(5).to_string())
+    print("-" * 78)
+
+    # conditions from the ragged edge : cpi out pce not
+    conds, cond_desc = build_conditions(ragged, cols, cfg)
+    if cond_desc:
+        print("\n[5] NOWCAST -- conditioning on released prints "
+              "(Waggoner-Zha hard conditions):")
+        for s in cond_desc:
+            print("      " + s)
+    else:
+        print("\n[5] NOWCAST -- no ragged edge detected; next-month forecast "
+              "is unconditional")
+
+    H = max(cfg["horizon"], len(ragged) if len(ragged) else 1)
+    draws_c = m.conditional_paths(Yq.values, H, conds, cfg["n_draws"], rng)
+    draws_u = m.conditional_paths(Yq.values, H, {}, cfg["n_draws"], rng)
+
+    fdates = pd.period_range(Yq.index[-1], periods=H + 1,
+                             freq="M")[1:].to_timestamp(how="end")
+
+    # nowcast table: every ragged month where the target is missing
+    now_rows = []
+    n_now = max(len(ragged), 1)
+    for h in range(1, n_now + 1):
+        d_c = draws_c[:, h - 1, tgt_j]
+        d_u = draws_u[:, h - 1, tgt_j]
+        label = fdates[h - 1].strftime("%Y-%m")
+        row = {
+            "month": label,
+            "mean": d_c.mean(), "median": np.median(d_c),
+            "lo68": np.quantile(d_c, 0.16), "hi68": np.quantile(d_c, 0.84),
+            "lo90": np.quantile(d_c, 0.05), "hi90": np.quantile(d_c, 0.95),
+            "uncond_mean": d_u.mean(),
+            "sd_ratio_cond/uncond": d_c.std() / max(d_u.std(), 1e-12),
+        }
+        for thr in cfg.get("nowcast_thresholds", []):
+            row[f"P(>{thr})"] = float((d_c > thr).mean())
+        row["P(<0)"] = float((d_c < 0).mean())
+        now_rows.append(row)
+        if h == 1:
+            plot_nowcast(d_c, d_u, f"{tcol} {label}",
+                         os.path.join(cfg["output_dir"],
+                                      "nowcast_density.png"))
+            # implied y/y for the next print, if modeling annualized m/m
+            if cfg["target_transform"] == "ann_log_growth" and len(Yq) >= 11:
+                dl_hist = Yq[tcol].iloc[-11:].values / 1200.0
+                yoy = 100.0 * (dl_hist.sum() + d_c / 1200.0)
+                print(f"      implied {label} y/y: mean {yoy.mean():.2f}%, "
+                      f"68% [{np.quantile(yoy, 0.16):.2f}, "
+                      f"{np.quantile(yoy, 0.84):.2f}]")
+    now = pd.DataFrame(now_rows)
+    print(f"\n    Next-print nowcast for {tcol} "
+          f"({cfg['target_transform']} units):")
+    print(now.round(5).to_string(index=False))
+    now.to_csv(os.path.join(cfg["output_dir"], "nowcast.csv"), index=False)
+
+    # 12 month forecast (conditional draws)
+    fc = pd.DataFrame({
+        "month": [d.strftime("%Y-%m") for d in fdates],
+        "median": np.median(draws_c[:, :, tgt_j], axis=0),
+        "mean": draws_c[:, :, tgt_j].mean(axis=0),
+        "lo68": np.quantile(draws_c[:, :, tgt_j], 0.16, axis=0),
+        "hi68": np.quantile(draws_c[:, :, tgt_j], 0.84, axis=0),
+        "lo90": np.quantile(draws_c[:, :, tgt_j], 0.05, axis=0),
+        "hi90": np.quantile(draws_c[:, :, tgt_j], 0.95, axis=0),
+        "prob_above_2": (draws_c[:, :, tgt_j] > 2.0).mean(axis=0),
+        "prob_negative": (draws_c[:, :, tgt_j] < 0).mean(axis=0),
+    })
+    print(f"\n    {cfg['horizon']}-month path (conditional on released data):")
+    print(fc.round(5).to_string(index=False))
+    fc.to_csv(os.path.join(cfg["output_dir"], "forecast.csv"), index=False)
+    plot_fan(Yq, draws_c, fdates, cfg,
+             os.path.join(cfg["output_dir"], "fan_chart.png"), len(conds))
+    sc = cfg.get("scenario", {})
+    if sc.get("enabled"):
+        sj = cols.index(sc["variable"])
+        order = ([cols.index(c) for c in sc["order"]] if sc.get("order")
+                 else None)
+        sm = sc.get("shock_month") or (len(ragged) + 1 if len(ragged) else 1)
+        #old stdev input stuff
+        #size = float(sc.get("size_sd", 1.0)) * float(sc.get("sign", 1))
+        #shock_sd = float(np.sqrt(m.S_post[sj, sj] / max(m.dof, 1)))
+        #implied = shock_sd *abs(size)
+
+#changes to include pct change rather than std deviation in shock
+        pct_change = float(sc.get("percent_change", 0.0))
+
+        shock_sd = float(np.sqrt(m.S_post[sj, sj] / max(m.dof,1)))
+
+        desired_change = np.log1p(pct_change / 100.0)
+        size = desired_change / shock_sd
+
+
+
+        tr = cfg["predictors"][sc["variable"]]["transform"]
+        print("--"*50)
+        if tr in ("log_diff"):
+            unit_pct = 100.0 * np.expm1(desired_change)
+            print(
+                    f"    {sc['variable']} = "
+                    f"{unit_pct:.2f}% | "
+                    f"log change = {desired_change:.4f} "
+                    f"equivalent shock = {size:+.2f} SD"
+            )
+        else:
+            print(f" Change in {sc['variable']} = "
+                  f"{desired_change:+.4f} model units |"
+                  f"equivalent shock = {size:+.2f} SD"
+            )
+        
+        print(f"\n[6] Scenario -- change {sc['variable']}"
+              f" in month {sm}")
+        print("--"*50)
+
+        base, shocked, deltas = m.scenario_forecasts(
+            Yq.values, H, sj, size, int(sm), cfg["n_draws"], rng, 
+            order = order, conditions=conds)
+        dl = deltas[:,:, tgt_j]
+        scen = pd.DataFrame({
+            "month": [d.strftime("%Y-%m") for d in fdates],
+            "baseline_mean":base[:, :, tgt_j].mean(axis=0),
+            "shocked_mean": shocked[:, :, tgt_j].mean(axis=0),
+            "delta_mean": dl.mean(axis=0),
+            "delta_lo68": np.quantile(dl, 0.16, axis=0),
+            "delta_hi68": np.quantile(dl, 0.84, axis=0),
+            "P(delta<0)":(dl<0).mean(axis=0),
+        })
+        print(scen.round(5).to_string(index=False))
+        scen.to_csv(os.path.join(cfg["output_dir"], "scenario.csv"),
+                    index=False)
+        
+
+    #  summary jaunt
+    with open(os.path.join(cfg["output_dir"], "summary.txt"), "w") as f:
+        f.write("BVAR PCE inflation forecast summary\n" + "=" * 40 + "\n")
+        f.write(f"sample: {Yq.index[0].date()} - {Yq.index[-1].date()} "
+                f"({len(Yq)} months)\n")
+        f.write(f"vars: {cols}\nlags: {cfg['n_lags']}\n")
+        f.write(f"hyperparams: lambda={lam}, soc={mu}, dio={tau}\n")
+        if cond_desc:
+            f.write("nowcast conditions:\n  " + "\n  ".join(cond_desc) + "\n")
+        f.write("\nOut-of-sample:\n" + summ + "\n")
+        f.write("\nNext-print nowcast:\n" + now.round(5).to_string(index=False))
+        f.write("\n\nForecast path:\n"
+                + fc.round(5).to_string(index=False) + "\n")
+    print(f"\nOutputs -> {os.path.abspath(cfg['output_dir'])}/")
+    return bt, now, fc
+
+
+
+# Self-test 
+
+
+def make_synthetic_monthly(seed=7):
+    """
+    Monthly panel 1999-01..2026-06. ENERGY leads; CPI and PCE share a common
+    core + a contemporaneous shock, so CPI(t) is genuinely informative about
+    PCE(t). Last month: CPI/ENERGY released, PCE = NaN (the ragged edge).
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("1999-01-31", "2026-06-30", freq="ME")
+    T = len(dates)
+    energy = np.zeros(T); core = np.zeros(T)
+    cpi = np.zeros(T); pce = np.zeros(T)
+    for t in range(1, T):
+        energy[t] = 0.6 * energy[t - 1] + rng.normal(0, 1.5)
+        u2 = rng.normal(0, 0.6)
+        core[t] = 0.6 * core[t - 1] + 0.8 + 0.25 * energy[t - 1] \
+            + rng.normal(0, 0.4)
+        cpi[t] = core[t] + 0.9 * energy[t] + u2
+        pce[t] = 0.85 * core[t] + 0.55 * energy[t] + 0.7 * u2 \
+            + rng.normal(0, 0.35)
+    noise = rng.normal(0, 1, T)
+    df = pd.DataFrame({"Date": dates, "PCE": pce + 2.0, "CPI": cpi + 2.3,
+                       "ENERGY": energy, "NOISE": noise})
+    df.loc[df.index[-1], "PCE"] = np.nan          # PCE not yet released
+    return df
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--excel", default=None)
+    args = ap.parse_args()
+
+    cfg = dict(CONFIG)
+    if args.excel:
+        cfg["excel_path"] = args.excel
+
+    if args.selftest:
+        print(">> SELF-TEST: synthetic aligned monthly panel; CPI(t) is "
+              "informative about PCE(t); last-month PCE missing (ragged "
+              "edge); NOISE is useless.\n")
+        panel = make_synthetic_monthly()
+        path = os.path.join(os.getcwd(), "bvar_selftest_inflation.xlsx")
+        panel.to_excel(path, index=False)
+        cfg.update({
+            "excel_path": path,
+            "output_dir": "bvar_output_selftest",
+            "data_frequency": "monthly",
+            "target_col": "PCE",
+            "target_transform": "level",
+            "target_release_shift_m": 0,
+            "predictors": {
+                "CPI":    {"transform": "level", "agg": "last"},
+                "ENERGY": {"transform": "level", "agg": "last"},
+                "NOISE":  {"transform": "level", "agg": "last"},
+            },
+            "nowcast_condition_cols": ["CPI", "ENERGY"],
+            "outlier_dummies": [],
+            "n_lags": 6,
+            "oos_start": "2018-01-01",
+            "oos_horizons": [1, 12],
+            "oos_step": 2,
+            "oos_draws": 250,
+            "n_draws": 2000,
+            "nowcast_thresholds": [2.0],
+        })
+    elif not os.path.exists(cfg["excel_path"]):
+        sys.exit(f"Excel not found: {cfg['excel_path']} "
+                 "(edit CONFIG, pass --excel, or run --selftest)")
+
+    run(cfg)
+
+
+if __name__ == "__main__":
+    main()
