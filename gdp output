@@ -1,0 +1,94 @@
+==============================================================================
+BVAR GDP FORECAST -- target: GDP Growth
+==============================================================================
+---------------------------------------------------------------------------------------------------- Alignment Test
+            GDP Growth       PCE  Unemployment  Exports Raw  INDPROD  Corporate Credit Spreads  Housing Starts Raw
+Date                                                                                                              
+2024-06-30         2.8  0.290110           4.0    -0.014550      0.9                147.718791           -0.055890
+2024-09-30         2.8  0.103261           4.2     0.021463      0.8                168.860761           -0.048602
+2024-12-31         2.3  0.154348           4.2    -0.006881     -0.1                144.994891            0.024312
+2025-03-31        -0.3  0.233333           4.1    -0.011615      0.7                153.449111            0.066246
+2025-06-30         3.0  0.130769           4.2     0.056610     -0.2                184.892088           -0.045499
+2025-09-30         3.0  0.204348           4.3    -0.039272      0.1                172.617174           -0.013512
+2025-12-31         1.4  0.300000           4.6     0.040916      0.2                173.620435           -0.025373
+2026-03-31         2.0  0.291111           4.4     0.006928      0.2                171.313889            0.027618
+GDP Growth                    2.000000
+PCE                           0.291111
+Unemployment                  4.400000
+Exports Raw                   0.006928
+INDPROD                       0.200000
+Corporate Credit Spreads    171.313889
+Housing Starts Raw            0.027618
+Name: 2026-03-31 00:00:00, dtype: float64
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+[1] Quarterly panel: 112 quarters x 7 vars, 1998-06-30 - 2026-03-31
+                             mean     std      min      max
+GDP Growth                  2.322   4.900  -32.900   33.100
+PCE                         0.172   0.157   -0.607    0.543
+Unemployment                5.554   1.908    3.500   13.300
+Exports Raw                 0.007   0.036   -0.220    0.091
+INDPROD                     0.162   0.600   -2.200    1.700
+Corporate Credit Spreads  245.692  71.791  144.995  561.300
+Housing Starts Raw         -0.002   0.077   -0.366    0.169
+    outlier dummies: ['2020Q2', '2020Q3']
+    prior own-lag means delta: {'GDP Growth': np.float64(0.9), 'PCE': np.float64(0.9), 'Unemployment': np.float64(0.9), 'Exports Raw': np.float64(0.0), 'INDPROD': np.float64(0.9), 'Corporate Credit Spreads': np.float64(0.9), 'Housing Starts Raw': np.float64(0.0)}
+
+[2] Hyperparameter selection (marginal likelihood, GLP 2015)
+    selected: lambda=0.5, soc_mu=None, dio_tau=1.0 (log-ML=-581.95)
+
+[3] Recursive out-of-sample backtest (origins from 2012-01-01)
+  h=1: BVAR RMSE=7.967 | AR(4)=12.208 (ratio 0.653) | mean=6.802 (ratio 1.171) | 68% coverage=73% | n=52
+  h=3: BVAR RMSE=6.776 | AR(4)=8.534 (ratio 0.794) | mean=6.773 (ratio 1.000) | 68% coverage=71% | n=52
+  h=4: BVAR RMSE=6.791 | AR(4)=8.631 (ratio 0.787) | mean=6.765 (ratio 1.004) | 68% coverage=77% | n=52
+  h=5: BVAR RMSE=6.767 | AR(4)=7.921 (ratio 0.854) | mean=6.759 (ratio 1.001) | 68% coverage=81% | n=52
+
+[4] Full-sample fit + 8-quarter density forecast (6000 draws)
+------------------------------------------------------------------------------------------------------------------------------------------------------
+
+GDP Growth equation coefficients (posterior mean):
+GDP Growth.L1                   0.230
+PCE.L1                          0.812
+Unemployment.L1                 0.327
+Exports Raw.L1                 -7.010
+INDPROD.L1                     -0.210
+Corporate Credit Spreads.L1    -0.019
+Housing Starts Raw.L1          -1.897
+GDP Growth.L1                   0.061
+PCE.L1                         -0.412
+Unemployment.L1                -0.184
+Exports Raw.L1                 -1.197
+INDPROD.L1                      0.117
+Corporate Credit Spreads.L1     0.006
+Housing Starts Raw.L1           1.763
+GDP Growth.L1                   0.004
+PCE.L1                         -0.664
+Unemployment.L1                 0.045
+Exports Raw.L1                 -1.480
+INDPROD.L1                     -0.141
+Corporate Credit Spreads.L1     0.003
+Housing Starts Raw.L1          -0.366
+GDP Growth.L1                  -0.004
+PCE.L1                          0.017
+Unemployment.L1                 0.006
+Exports Raw.L1                 -0.252
+INDPROD.L1                      0.021
+Corporate Credit Spreads.L1     0.001
+Housing Starts Raw.L1           0.189
+const                           2.712
+D_2020Q2                      -32.513
+D_2020Q3                       36.222
+------------------------------------------------------------------------------------------------------------------------------------------------------
+quarter  median  mean  lo68  hi68  lo90  hi90  prob_negative
+ 2026Q2    2.40  2.41  0.47  4.39 -0.88  5.62           0.11
+ 2026Q3    2.23  2.24  0.09  4.42 -1.34  5.85           0.15
+ 2026Q4    2.02  2.07 -0.14  4.31 -1.56  5.83           0.18
+ 2027Q1    2.03  2.05 -0.24  4.30 -1.71  5.94           0.19
+ 2027Q2    2.05  2.05 -0.25  4.32 -1.75  5.88           0.19
+ 2027Q3    2.11  2.06 -0.27  4.33 -1.81  5.88           0.19
+ 2027Q4    2.08  2.07 -0.30  4.41 -1.78  5.95           0.19
+ 2028Q1    2.20  2.14 -0.20  4.53 -1.84  5.96           0.18
+
+Q2 predictor obersvations: {'PCE': 0.4, 'Unemployment': 4.3, 'Exports Raw': -0.062, 'INDPROD': 0.1, 'Corporate Credit Spreads': 153.7, 'Housing Starts Raw': -0.234}
+Q2 2026 GDP nowcast: mean 1.49, median 1.48
+ 68% [-0.50, 3.49]90%[-1.77, 4.85]p(neg) 23%
